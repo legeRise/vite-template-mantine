@@ -374,6 +374,29 @@ export async function deleteScene(
   );
 }
 
+/** A single scene patch in a bulk save. */
+export interface BulkScenePatch {
+  scene_id: number;
+  scene_title?: string;
+  image_prompt?: string;
+  start?: number;
+  end?: number;
+}
+
+/** Save many scene edits in one request (used by the local-first autosave flush). */
+export async function bulkSaveScenes(
+  trackerId: string,
+  scenes: BulkScenePatch[]
+): Promise<{ saved: boolean; scenes: SceneDto[] }> {
+  return request<{ saved: boolean; scenes: SceneDto[] }>(
+    `/api/text2video/video-jobs/${trackerId}/scenes/bulk-edit/`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ scenes }),
+    }
+  );
+}
+
 /** Create a new scene, appended to the end of the job (or at a given order). */
 export async function createScene(
   trackerId: string,
@@ -394,6 +417,23 @@ export async function regenerateSceneImage(
     method: 'POST',
     body: JSON.stringify(promptOverride ? { prompt_override: promptOverride } : {}),
   });
+}
+
+/**
+ * "Change with AI" — ask the LLM to revise a scene's prompt from a short user
+ * instruction, then regenerate the image. Returns the scene + the AI's reason.
+ */
+export async function changeSceneWithAI(
+  sceneId: number,
+  instruction: string
+): Promise<SceneDto & { reason?: string }> {
+  return request<SceneDto & { reason?: string }>(
+    `/api/text2video/scenes/${sceneId}/change-with-ai/`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ instruction }),
+    }
+  );
 }
 
 /** Step 6 — fetch a scene's image (convenience). */

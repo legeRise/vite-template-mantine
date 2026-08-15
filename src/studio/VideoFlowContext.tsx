@@ -16,10 +16,11 @@ import {
   uploadVideoForScenes,
   getJobScenes,
   streamJobStatus,
-  patchScene,
   createScene,
   deleteScene as apiDeleteScene,
+  bulkSaveScenes,
   regenerateSceneImage,
+  changeSceneWithAI,
   resolveMediaUrl,
   getAccessToken,
   clearTokens,
@@ -95,11 +96,26 @@ interface VideoFlowValue {
   scenes: SceneModel[];
   scenesLoading: boolean;
   fetchScenes: () => Promise<SceneModel[]>;
-  updateScene: (sceneId: number, patch: SceneEditPayload) => Promise<SceneModel>;
+  updateScene: (sceneId: number, patch: SceneEditPayload) => SceneModel;
   addScene: (patch?: SceneEditPayload) => Promise<SceneModel>;
   deleteScene: (sceneId: number) => Promise<SceneModel[]>;
+  /** Move the boundary between a scene and the next (fixed total duration). */
+  moveSceneBoundary: (sceneId: number, newEnd: number) => SceneModel[];
+  /** Move the boundary between the previous scene and this one (fixed total duration).
+   *  This drags the scene's LEFT edge. */
+  moveSceneStart: (sceneId: number, newStart: number) => SceneModel[];
   regenerateImage: (sceneId: number, promptOverride?: string) => Promise<SceneModel>;
+  /** "Change with AI" — revise a scene's prompt from a short instruction, then regenerate. */
+  changeWithAI: (sceneId: number, instruction: string) => Promise<SceneModel>;
   openCreation: (trackerId: string, label?: string) => Promise<SceneModel[]>;
+  // Undo / Redo
+  canUndo: boolean;
+  canRedo: boolean;
+  undo: () => void;
+  redo: () => void;
+  /** Increments on every undo/redo so editors can detect & sync to an external
+   *  snapshot restore (and avoid re-applying a stale autosave). */
+  historyToken: number;
 }
 
 const VideoFlowContext = createContext<VideoFlowValue | null>(null);
@@ -116,6 +132,16 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
   const [jobError, setJobError] = useState<string | null>(null);
   const [scenes, setScenes] = useState<SceneModel[]>([]);
   const [scenesLoading, setScenesLoading] = useState(false);
+  // Undo/redo history stacks of scene snapshots.
+  const [past, setPast] = useState<SceneModel[][]>([]);
+  const [future, setFuture] = useState<SceneModel[][]>([]);
+  // Bumped on every undo/redo so editors know a snapshot was restored externally.
+  const [historyToken, setHistoryToken] = useState(0);
+  // Identity of the last snapshot pushed, so `recordHistory` can coalesce the
+  // repeated autosave ticks of a single edit into ONE undo step.
+  const lastHistoryRef = useRef<SceneModel[] | null>(null);
+  const scenesRef = useRef<SceneModel[]>([]);
+  scenesRef.current = scenes;
 
   const streamAbortRef = useRef<(() => void) | null>(null);
 
@@ -124,6 +150,20 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       streamAbortRef.current();
       streamAbortRef.current = null;
     }
+  }, []);
+
+  // Push the current scene snapshot onto the undo stack. Call before any
+  // mutating edit so a later undo() can restore this exact state.
+  // Coalesces: if this snapshot is identical to the last pushed one (e.g. the
+  // repeated 250ms autosave ticks while the user is finishing a keystroke),
+  // it is NOT pushed again — so a single edit = one undo step, and redo isn't
+  // wiped by every autosave tick.
+  const recordHistory = useCallback(() => {
+    const current = scenesRef.current;
+    if (lastHistoryRef.current === current) return;
+    lastHistoryRef.current = current;
+    setPast((prev) => [...prev.slice(-49), current]);
+    setFuture([]);
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
@@ -144,6 +184,9 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     setVideoLabel('');
     setScenes([]);
     setJobError(null);
+    setPast([]);
+    setFuture([]);
+    lastHistoryRef.current = null;
     stopStreaming();
   }, [stopStreaming]);
 
@@ -158,6 +201,9 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     setVideoLabel('');
     setScenes([]);
     setJobError(null);
+    setPast([]);
+    setFuture([]);
+    lastHistoryRef.current = null;
   }, [stopStreaming]);
 
   // SSE-based progress stream driven by jobPhase. Called by uploadAndStart.
@@ -249,6 +295,9 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       stopStreaming();
       setJobError(null);
       setScenesLoading(true);
+      setPast([]);
+      setFuture([]);
+      lastHistoryRef.current = null;
       try {
         const res = await getJobScenes(targetTrackerId);
         setTrackerId(res.tracker_id);
@@ -275,17 +324,32 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     [stopStreaming]
   );
 
+  /**
+   * Apply an edit locally (persisted to localStorage instantly; synced to the
+   * backend on leave/hide/pause via the bulk flush). Does NOT hit the backend
+   * per change.
+   */
   const updateScene = useCallback(
-    async (sceneId: number, patch: SceneEditPayload) => {
+    (sceneId: number, patch: SceneEditPayload) => {
       if (!trackerId) {
         throw new Error('No active job');
       }
-      const updated = await patchScene(trackerId, sceneId, patch);
-      const model = toSceneModel(updated);
-      setScenes((prev) => prev.map((s) => (s.id === sceneId ? model : s)));
-      return model;
+      recordHistory();
+      const next = scenesRef.current.map((s) => {
+        if (s.id !== sceneId) return s;
+        return {
+          ...s,
+          title: patch.scene_title ?? s.title,
+          prompt: patch.image_prompt ?? s.prompt,
+          startSeconds: patch.start ?? s.startSeconds,
+          endSeconds: patch.end ?? s.endSeconds,
+          edited: true,
+        };
+      });
+      setScenes(next);
+      return next.find((s) => s.id === sceneId) ?? scenesRef.current[0];
     },
-    [trackerId]
+    [trackerId, recordHistory]
   );
 
   const addScene = useCallback(
@@ -293,12 +357,13 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       if (!trackerId) {
         throw new Error('No active job');
       }
+      recordHistory();
       const updated = await createScene(trackerId, patch ?? {});
       const model = toSceneModel(updated);
       setScenes((prev) => [...prev, model]);
       return model;
     },
-    [trackerId]
+    [trackerId, recordHistory]
   );
 
   const deleteScene = useCallback(
@@ -306,20 +371,152 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       if (!trackerId) {
         throw new Error('No active job');
       }
+      recordHistory();
       const res = await apiDeleteScene(trackerId, sceneId);
       const models = res.scenes.map(toSceneModel);
       setScenes(models);
       return models;
     },
-    [trackerId]
+    [trackerId, recordHistory]
   );
 
+  /**
+   * Move a scene's end time and ripple: every scene that follows shifts by the
+   * same delta so there are no gaps or overlaps. Each changed scene is saved via
+   * the existing per-scene PATCH endpoint, and the local list is updated
+   * optimistically for a snappy drag feel.
+   */
+  /**
+   * Move the boundary between scene `sceneId` and the scene that follows it to
+   * `newEnd`. Scene N's end and scene N+1's start both move to the new cut
+   * point; the overall video duration stays fixed (time-bound timeline). Saved
+   * via the existing per-scene PATCH endpoint, with an optimistic local update
+   * for a snappy drag feel.
+   */
+  /**
+   * Move the boundary between scene `sceneId` and the one after it to `newEnd`.
+   * Applied locally (persisted to localStorage instantly; synced to the backend
+   * on leave/hide/pause via the bulk flush), so the backend is NOT hit per drag.
+   */
+  const moveSceneBoundary = useCallback(
+    (sceneId: number, newEnd: number) => {
+      if (!trackerId) {
+        throw new Error('No active job');
+      }
+      const ordered = [...scenesRef.current].sort(
+        (a, b) => a.order - b.order || a.startSeconds - b.startSeconds
+      );
+      const idx = ordered.findIndex((s) => s.id === sceneId);
+      if (idx === -1 || idx >= ordered.length - 1) {
+        // Scene not found or has no right-hand neighbour (last scene) — no-op.
+        return scenesRef.current;
+      }
+      const target = ordered[idx];
+      const nextTarget = ordered[idx + 1];
+      const cleaned = Math.round(newEnd * 100) / 100;
+      const minBound = target.startSeconds + 0.3;
+      const maxBound = nextTarget.endSeconds - 0.3;
+      const bounded = Math.min(Math.max(cleaned, minBound), maxBound);
+      if (Math.abs(bounded - target.endSeconds) < 0.05) {
+        return scenesRef.current;
+      }
+
+      recordHistory();
+
+      setScenes((prev) =>
+        prev.map((s) => {
+          if (s.id === target.id) return { ...s, endSeconds: bounded, edited: true };
+          if (s.id === nextTarget.id) return { ...s, startSeconds: bounded, edited: true };
+          return s;
+        })
+      );
+      return scenesRef.current;
+    },
+    [trackerId, recordHistory]
+  );
+
+  // Move the boundary to the LEFT of a scene — scene N's start and scene N-1's
+  // end both slide to `newStart`. Total video length stays fixed.
+  const moveSceneStart = useCallback(
+    (sceneId: number, newStart: number) => {
+      if (!trackerId) {
+        throw new Error('No active job');
+      }
+      const ordered = [...scenesRef.current].sort(
+        (a, b) => a.order - b.order || a.startSeconds - b.startSeconds
+      );
+      const idx = ordered.findIndex((s) => s.id === sceneId);
+      if (idx <= 0 || idx === -1) {
+        // No left-hand neighbour (first scene) or not found — no-op.
+        return scenesRef.current;
+      }
+      const target = ordered[idx];
+      const prevTarget = ordered[idx - 1];
+      const cleaned = Math.round(newStart * 100) / 100;
+      const minBound = prevTarget.startSeconds + 0.3;
+      const maxBound = target.endSeconds - 0.3;
+      const bounded = Math.min(Math.max(cleaned, minBound), maxBound);
+      if (Math.abs(bounded - target.startSeconds) < 0.05) {
+        return scenesRef.current;
+      }
+
+      recordHistory();
+
+      setScenes((prev) =>
+        prev.map((s) => {
+          if (s.id === target.id) return { ...s, startSeconds: bounded, edited: true };
+          if (s.id === prevTarget.id) return { ...s, endSeconds: bounded, edited: true };
+          return s;
+        })
+      );
+      return scenesRef.current;
+    },
+    [trackerId, recordHistory]
+  );
+
+  // --- Undo / Redo ---
+  const undo = useCallback(() => {
+    setPast((prevPast) => {
+      if (prevPast.length === 0) return prevPast;
+      const prev = prevPast[prevPast.length - 1];
+      const rest = prevPast.slice(0, -1);
+      setFuture((prevFuture) => [...prevFuture, scenesRef.current]);
+      setScenes(prev);
+      setHistoryToken((t) => t + 1);
+      return rest;
+    });
+  }, []);
+
+  const redo = useCallback(() => {
+    setFuture((prevFuture) => {
+      if (prevFuture.length === 0) return prevFuture;
+      const next = prevFuture[prevFuture.length - 1];
+      const rest = prevFuture.slice(0, -1);
+      setPast((prevPast) => [...prevPast, scenesRef.current]);
+      setScenes(next);
+      setHistoryToken((t) => t + 1);
+      return rest;
+    });
+  }, []);
+
   const regenerateImage = useCallback(async (sceneId: number, promptOverride?: string) => {
+    recordHistory();
     const updated = await regenerateSceneImage(sceneId, promptOverride);
     const model = toSceneModel(updated);
     setScenes((prev) => prev.map((s) => (s.id === sceneId ? model : s)));
     return model;
-  }, []);
+  }, [recordHistory]);
+
+  const changeWithAI = useCallback(
+    async (sceneId: number, instruction: string) => {
+      recordHistory();
+      const updated = await changeSceneWithAI(sceneId, instruction);
+      const model = toSceneModel(updated);
+      setScenes((prev) => prev.map((s) => (s.id === sceneId ? model : s)));
+      return model;
+    },
+    [recordHistory]
+  );
 
   // When the job completes, auto-load scenes once.
   useEffect(() => {
@@ -331,6 +528,80 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
 
   // Cleanup streaming on unmount.
   useEffect(() => stopStreaming, [stopStreaming]);
+
+  // --- Local-first persistence ---
+  // Work is written to localStorage INSTANTLY on every change (so the backend is
+  // NOT hit per keystroke/drag). It is flushed to the backend on page leave /
+  // hide / a quiet pause, so the DB stays in sync without spamming requests.
+  const draftKey = (id: string | null = trackerId) =>
+    id ? `ezclip:draft:${id}` : null;
+
+  // Write the current draft to localStorage whenever scenes or tracker change.
+  useEffect(() => {
+    if (!trackerId) return;
+    const key = draftKey(trackerId);
+    if (!key) return;
+    try {
+      localStorage.setItem(
+        key,
+        JSON.stringify(
+          scenes.map((s) => ({
+            id: s.id,
+            scene_title: s.title,
+            image_prompt: s.prompt,
+            start: s.startSeconds,
+            end: s.endSeconds,
+            edited: s.edited,
+          }))
+        )
+      );
+    } catch {
+      /* localStorage may be unavailable; ignore */
+    }
+  }, [scenes, trackerId]);
+
+  const latestRef = useRef({ trackerId, scenes });
+  latestRef.current = { trackerId, scenes };
+
+  // Flush the current draft to the backend (bulk save). Used on leave/hide/pause.
+  const flushToBackend = useCallback(async () => {
+    const { trackerId: id, scenes: sc } = latestRef.current;
+    if (!id || sc.length === 0) return;
+    const payload = sc.map((s) => ({
+      scene_id: s.id,
+      scene_title: s.title,
+      image_prompt: s.prompt,
+      start: s.startSeconds,
+      end: s.endSeconds,
+    }));
+    try {
+      await bulkSaveScenes(id, payload);
+    } catch {
+      /* offline / blocked — draft remains safe in localStorage */
+    }
+  }, []);
+
+  // Flush when the user hides/leaves the page, or after a quiet pause (~2.5s).
+  useEffect(() => {
+    const onHide = () => {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      flushToBackend();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        // eslint-disable-next-line @typescript-eslint/no-floating-promises
+        flushToBackend();
+      }
+    };
+    window.addEventListener('pagehide', onHide);
+    window.addEventListener('beforeunload', onHide);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', onHide);
+      window.removeEventListener('beforeunload', onHide);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [flushToBackend]);
 
   const value = useMemo<VideoFlowValue>(
     () => ({
@@ -353,8 +624,16 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       updateScene,
       addScene,
       deleteScene,
+      moveSceneBoundary,
+      moveSceneStart,
       regenerateImage,
+      changeWithAI,
       openCreation,
+      canUndo: past.length > 0,
+      canRedo: future.length > 0,
+      undo,
+      redo,
+      historyToken,
     }),
     [
       isAuthenticated,
@@ -376,8 +655,16 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       updateScene,
       addScene,
       deleteScene,
+      moveSceneBoundary,
+      moveSceneStart,
       regenerateImage,
+      changeWithAI,
       openCreation,
+      past,
+      future,
+      undo,
+      redo,
+      historyToken,
     ]
   );
 
