@@ -1,10 +1,15 @@
-import { createBrowserRouter, RouterProvider } from 'react-router-dom';
-import { HomePage } from './pages/Home.page';
+import { createBrowserRouter, RouterProvider, Navigate } from 'react-router-dom';
+import { Studio } from './studio/Studio';
 
 const router = createBrowserRouter([
+  // All flow steps live in the Studio container which manages the step state.
   {
     path: '/',
-    element: <HomePage />,
+    element: <Studio />,
+  },
+  {
+    path: '*',
+    element: <Navigate to="/" replace />,
   },
 ]);
 
