@@ -15,6 +15,7 @@ import {
   Title,
 } from '@mantine/core';
 import { getAccessToken, getSceneImageFileUrl, sceneOverlayAlpha } from '../../lib/api';
+import { encodeOffline, isOfflineEncodingSupported } from '../../lib/offlineEncode';
 import type { SceneModel } from '../VideoFlowContext';
 
 interface ExportViewProps {
@@ -61,6 +62,32 @@ export function ExportView({
     setPhase('rendering');
     setProgress(0);
     setError(null);
+
+    // ------------------------------------------------------------------
+    // Fast path: offline WebCodecs encoding (modern browsers). This runs
+    // much faster than real time — "export in seconds". Falls through to
+    // the MediaRecorder recording path below if unsupported.
+    // ------------------------------------------------------------------
+    if (isOfflineEncodingSupported() && (videoUrl || audioUrl)) {
+      try {
+        const result = await encodeOffline({
+          videoUrl,
+          audioUrl,
+          scenes,
+          resolution: resolution as '1080p' | '720p',
+          onProgress: setProgress,
+        });
+        const url = URL.createObjectURL(result.blob);
+        setDownloadUrl(url);
+        setProgress(100);
+        setPhase('done');
+        return;
+      } catch (err) {
+        // Fall back to the real-time MediaRecorder path instead of failing.
+        setError(err instanceof Error ? err.message : 'Offline export failed; using fallback.');
+        setProgress(0);
+      }
+    }
 
     const imageObjectUrls: string[] = [];
 
@@ -299,6 +326,23 @@ export function ExportView({
 
       audio?.addEventListener('ended', onEnded, { once: true });
 
+      // ------------------------------------------------------------------
+      // Explicit, layout-independent render surface.
+      //
+      // Set the canvas backing-store to the *selected* export resolution so
+      // exports stay high-resolution regardless of any CSS-driven layout
+      // scaling. 1080p -> 1920x1080, 720p -> 1280x720. The source frame is
+      // letterboxed/drawn to fill this surface in drawFrame above.
+      // ------------------------------------------------------------------
+      const [OUT_W, OUT_H] = resolution === '1080p' ? [1920, 1080] : [1280, 720];
+      canvas.width = OUT_W;
+      canvas.height = OUT_H;
+      // Explicit attributes mirror the backing store; irrelevant for capture
+      // (which uses width/height) but keeps the element honest if it is ever
+      // mounted into the DOM.
+      canvas.setAttribute('width', String(OUT_W));
+      canvas.setAttribute('height', String(OUT_H));
+
       if (hasVideo) {
         video = document.createElement('video');
         video.crossOrigin = 'anonymous';
@@ -306,11 +350,6 @@ export function ExportView({
         video.preload = 'auto';
         video.src = videoUrl!;
         await waitForMetadata(video, 'Could not load source video.');
-
-        const vw = video.videoWidth || 1280;
-        const vh = video.videoHeight || 720;
-        canvas.width = vw;
-        canvas.height = vh;
 
         if (Number.isFinite(video.duration) && video.duration > 0) {
           total = Math.max(total, video.duration);
@@ -320,8 +359,6 @@ export function ExportView({
         video.addEventListener('ended', onEnded, { once: true });
         drawFrame(0, video, true);
       } else {
-        canvas.width = resolution === '1080p' ? 1920 : 1280;
-        canvas.height = resolution === '1080p' ? 1080 : 720;
         drawFrame(0, null, false);
       }
 

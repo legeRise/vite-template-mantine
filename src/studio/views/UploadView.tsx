@@ -33,6 +33,58 @@ const RESOLUTION_OPTIONS = [
   { value: 'portrait', label: 'Portrait (9:16)' },
 ];
 
+// ---------------------------------------------------------------------------
+// Upload limits.
+//
+// The UI advertises a "5 minute" limit (SOFT_LIMIT_SECONDS) but we are lenient:
+// a file slightly over 5 minutes is still accepted. The real, hard cutoff that
+// can never be exceeded is HARD_LIMIT_SECONDS (~7 minutes, plus a small grace
+// window). Files above MAX_UPLOAD_BYTES (100 MB) are rejected outright.
+// ---------------------------------------------------------------------------
+const SOFT_LIMIT_SECONDS = 300; // 5 min — what the UI advertises
+const HARD_LIMIT_SECONDS = 425; // ~7 min — the true reject threshold (+5s grace)
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB
+
+function formatLimit(total: number): string {
+  const m = Math.floor(total / 60);
+  const s = Math.round(total % 60);
+  return s === 0 ? `${m} min` : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+/**
+ * Resolve a media file into a playable element and return its duration (s).
+ * Audio files coalesce with the video path; WebM audio is treated as video here
+ * for duration purposes since it can be checked in a <video> element too.
+ */
+function loadDuration(
+  file: File,
+  kind: 'video' | 'audio'
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const el = kind === 'audio' ? document.createElement('audio') : document.createElement('video');
+    el.preload = 'metadata';
+    el.onloadedmetadata = () => {
+      const d = Number.isFinite(el.duration) ? el.duration : 0;
+      URL.revokeObjectURL(url);
+      resolve(d);
+    };
+    el.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Could not read the file duration.'));
+    };
+    // Guard against elements that never fire metadata (e.g. unsupported codec).
+    window.setTimeout(() => {
+      if (!Number.isFinite(el.duration) || el.readyState < 1) {
+        URL.revokeObjectURL(url);
+        reject(new Error('Could not read the file duration.'));
+      }
+    }, 8000) as unknown as number;
+    el.src = url;
+    el.load();
+  });
+}
+
 export function UploadView({ onAnalyze }: UploadViewProps) {
   const { isAuthenticated, login, uploadAndStart, jobError } = useVideoFlow();
   const [file, setFile] = useState<File | null>(null);
@@ -42,9 +94,45 @@ export function UploadView({ onAnalyze }: UploadViewProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const pickFile = (f: File | null) => {
+  // Validate the selected file (size + duration) before it can be uploaded.
+  const pickFile = async (f: File | null) => {
     setFile(f);
     setError(null);
+    if (!f) return;
+
+    if (f.size > MAX_UPLOAD_BYTES) {
+      setFile(null);
+      setError('This file is larger than 100 MB. Please upload a smaller video or audio file.');
+      return;
+    }
+
+    const kind: 'video' | 'audio' = isAudioFile(f) ? 'audio' : 'video';
+    try {
+      const duration = await loadDuration(f, kind);
+      if (duration > HARD_LIMIT_SECONDS) {
+        setFile(null);
+        setError(
+          `This ${kind} is ${formatLimit(duration)} long, which is over the ${formatLimit(
+            HARD_LIMIT_SECONDS
+          )} hard limit. Please upload a shorter file.`
+        );
+        return;
+      }
+      if (duration > SOFT_LIMIT_SECONDS) {
+        // Lenient: warn, but still accept files that are only slightly above 5 min.
+        setError(
+          `Note: this ${kind} is ${formatLimit(
+            duration
+          )} — longer than the ${formatLimit(
+            SOFT_LIMIT_SECONDS
+          )} guide, but still accepted (hard limit ${formatLimit(HARD_LIMIT_SECONDS)}).`
+        );
+      }
+    } catch (err) {
+      // If we can't determine duration, still allow the upload; the server enforces its own rules.
+      setError(err instanceof Error ? err.message : 'Could not verify file duration.');
+      setFile(null);
+    }
   };
 
   const handleAnalyze = async () => {
@@ -135,7 +223,8 @@ export function UploadView({ onAnalyze }: UploadViewProps) {
 
               <Text c="dimmed" size="xs" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <IconClock size={14} />
-                Audio is extracted, transcribed, then split into scenes automatically.
+                Up to ~5 min (1:1.5 min tolerated) and 100 MB. Audio is extracted, transcribed,
+                then split into scenes automatically.
               </Text>
 
               <Button

@@ -2085,6 +2085,29 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/dom-mediacapture-transform@npm:^0.1.11":
+  version: 0.1.12
+  resolution: "@types/dom-mediacapture-transform@npm:0.1.12"
+  dependencies:
+    "@types/dom-webcodecs": "npm:*"
+  checksum: 10c0/340d31b37dd12c4c145d9cb1e10057376bcbefeb32833bb829a9cea430e04ddc6f5a942479f92ad9f33adb8ee0fe208675cb1f3f1ad501c8e8c50f0a14cd496c
+  languageName: node
+  linkType: hard
+
+"@types/dom-webcodecs@npm:*":
+  version: 0.1.18
+  resolution: "@types/dom-webcodecs@npm:0.1.18"
+  checksum: 10c0/dcf0a36869bddb6ec1534039911bd5517985c03503da6d6cfea4ef26480c763f91b2ef4f03dcc7b3c8a68740efc1ed93b0f63a865823877eb8675f98a772f67d
+  languageName: node
+  linkType: hard
+
+"@types/dom-webcodecs@npm:0.1.13":
+  version: 0.1.13
+  resolution: "@types/dom-webcodecs@npm:0.1.13"
+  checksum: 10c0/16683fd0330fdfbb867affec1c18fd493d88433a4ec66257579adc5d07b07e9492268b4401e9017b7388b13750722365b0392b375e39c84e74f564d5b4f634a4
+  languageName: node
+  linkType: hard
+
 "@types/estree@npm:^1.0.0":
   version: 1.0.5
   resolution: "@types/estree@npm:1.0.5"
@@ -4178,6 +4201,7 @@ __metadata:
     "@vitejs/plugin-react": "npm:^6.0.0"
     identity-obj-proxy: "npm:^3.0.0"
     jsdom: "npm:^30.0.0"
+    mediabunny: "npm:^1.53.1"
     oxc-config-mantine: "npm:^1.0.0"
     oxfmt: "npm:^0.62.0"
     oxlint: "npm:^1.70.0"
@@ -4222,6 +4246,16 @@ __metadata:
   version: 2.26.0
   resolution: "mdn-data@npm:2.26.0"
   checksum: 10c0/e5f17f4dac247f3e260c081761628d371e23659a7ff13413f83f5bd7fd0f2d8317e72277bb77f0e13115041334ff728a5363db64aabaf376c0e1b0b31016d0b8
+  languageName: node
+  linkType: hard
+
+"mediabunny@npm:^1.53.1":
+  version: 1.53.1
+  resolution: "mediabunny@npm:1.53.1"
+  dependencies:
+    "@types/dom-mediacapture-transform": "npm:^0.1.11"
+    "@types/dom-webcodecs": "npm:0.1.13"
+  checksum: 10c0/7d5622336201e6e367a2d9d3a71b9caac4795386545277c36c2043425c678a8838a89c654f5e24e5758d898bf79c677a772d99405f745fbe22e0fc6d54f1c155
   languageName: node
   linkType: hard
 
