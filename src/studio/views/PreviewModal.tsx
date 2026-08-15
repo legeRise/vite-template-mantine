@@ -163,9 +163,13 @@ export function PreviewModal({
     [previewStart, syncMediaTo]
   );
 
-  // Overlay opacity from the alternating cycle (image <-> video).
+  // Overlay opacity: the scene image appears once at the scene start, then
+  // the real person is revealed for the rest of the scene (no flip-flopping).
   const overlayAlpha = overlayScene.imageUrl
-    ? sceneOverlayAlpha(currentTime - overlayScene.startSeconds)
+    ? sceneOverlayAlpha(
+        currentTime - overlayScene.startSeconds,
+        overlayScene.endSeconds - overlayScene.startSeconds
+      )
     : 0;
 
   return (

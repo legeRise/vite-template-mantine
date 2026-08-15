@@ -321,6 +321,17 @@ export async function patchScene(
   });
 }
 
+/** Create a new scene, appended to the end of the job (or at a given order). */
+export async function createScene(
+  trackerId: string,
+  payload: SceneEditPayload & { order?: number }
+): Promise<SceneDto> {
+  return request<SceneDto>(`/api/text2video/video-jobs/${trackerId}/scenes/create/`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 /** Step 5 — regenerate one scene's image (optionally with a prompt override). */
 export async function regenerateSceneImage(
   sceneId: number,
@@ -381,28 +392,29 @@ export function formatDelta(seconds: number): string {
 
 /**
  * Overlay opacity for the generated scene image over the real video at a given
- * playback position within a scene (elapsed = currentTime - scene.startSeconds).
+ * playback position within a scene.
  *
- * Instead of blending video + image 50/50 constantly, the image and the video
- * *alternate* so they "change places": the image fades in to fully cover the
- * video for a moment, then fades out to reveal the real video again. This
- * continues in a repeating cycle for the whole scene.
+ * The image appears exactly ONCE at the start of each scene — it fades in over
+ * the real "person" footage, holds briefly, then fades out so the real person
+ * is visible for the rest of the scene. It never flip-flops back to the image,
+ * which reads as one clean "title card" moment per scene rather than the old
+ * rapid image<->video alternating cycle.
  *
- * Returns an opacity 0..1. Use `sceneOverlayAlpha(elapsed).alpha === 0` to
- * detect the "video visible" moments, and 1 for the "image visible" moments.
+ * Returns an opacity 0..1.
  */
-export function sceneOverlayAlpha(elapsed: number): number {
-  const FADE = 0.6; // seconds to cross-fade in/out
-  const HOLD = 2.4; // seconds the image stays fully visible
-  const GAP = 0.6; // seconds the video is fully visible between images
-  const p1 = FADE; // image fades in: 0 -> 1
-  const p2 = p1 + HOLD; // image holds at 1
-  const p3 = p2 + FADE; // image fades out: 1 -> 0
-  const P = p3 + GAP; // full cycle period
-  const phase = ((elapsed % P) + P) % P;
+export function sceneOverlayAlpha(elapsed: number, sceneDuration = 8): number {
+  // Show the image for the first PORTION of the scene, then reveal the person.
+  // Longer scenes show it a fraction of the time too, capped so very short
+  // scenes still get one visible image moment.
+  const SHOW_FRACTION = 0.35; // first 35% of the scene shows the image
+  const MIN_IMAGE_TIME = 2.2; // seconds the image is at least held
+  const TOTAL = Math.max(sceneDuration * SHOW_FRACTION, MIN_IMAGE_TIME);
+  const FADE = 0.5; // seconds to cross-fade in/out
 
-  if (phase < p1) return phase / FADE; // fade in (video -> image)
-  if (phase < p2) return 1; // image only
-  if (phase < p3) return 1 - (phase - p2) / FADE; // fade out (image -> video)
-  return 0; // video only
+  if (elapsed >= TOTAL) return 0; // person visible for the rest of the scene
+  const p1 = FADE; // image fades in: 0 -> 1
+  const p2 = Math.max(TOTAL - FADE, FADE); // image begins fading out
+  if (elapsed < p1) return elapsed / FADE; // fade in (person -> image)
+  if (elapsed < p2) return 1; // image only (held)
+  return Math.max(0, 1 - (elapsed - p2) / FADE); // fade out (image -> person)
 }

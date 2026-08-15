@@ -173,18 +173,16 @@ export function ExportView({
           scenes.find((s) => t >= s.startSeconds && t < s.endSeconds) ?? scenes[scenes.length - 1];
         const img = scene ? (images[scenes.indexOf(scene)] ?? firstLoadedImage) : firstLoadedImage;
         if (scene && img.naturalWidth > 0) {
-          const alpha = alternate ? sceneOverlayAlpha(t - scene.startSeconds) : 1;
+          const alpha = alternate
+            ? sceneOverlayAlpha(t - scene.startSeconds, scene.endSeconds - scene.startSeconds)
+            : 1;
           if (alpha > 0) {
             ctx.globalAlpha = alpha;
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             ctx.globalAlpha = 1;
           }
-          // Scene label chip.
-          ctx.fillStyle = 'rgba(0,0,0,0.6)';
-          ctx.fillRect(12, 12, 300, 40);
-          ctx.fillStyle = '#fff';
-          ctx.font = 'bold 20px sans-serif';
-          ctx.fillText(`Scene ${String(scene.number).padStart(2, '0')} · ${scene.title}`, 24, 40);
+          // NOTE: no scene label/number is burned into the video — the scene
+          // topic is available via the "Download Topics" button instead.
         }
 
         setProgress(Math.min(100, total > 0 ? Math.round((t / total) * 100) : 0));

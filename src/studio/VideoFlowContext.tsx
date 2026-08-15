@@ -17,6 +17,7 @@ import {
   getJobScenes,
   streamJobStatus,
   patchScene,
+  createScene,
   regenerateSceneImage,
   resolveMediaUrl,
   getAccessToken,
@@ -94,6 +95,7 @@ interface VideoFlowValue {
   scenesLoading: boolean;
   fetchScenes: () => Promise<SceneModel[]>;
   updateScene: (sceneId: number, patch: SceneEditPayload) => Promise<SceneModel>;
+  addScene: (patch?: SceneEditPayload) => Promise<SceneModel>;
   regenerateImage: (sceneId: number, promptOverride?: string) => Promise<SceneModel>;
 }
 
@@ -247,6 +249,19 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     [trackerId]
   );
 
+  const addScene = useCallback(
+    async (patch?: SceneEditPayload) => {
+      if (!trackerId) {
+        throw new Error('No active job');
+      }
+      const updated = await createScene(trackerId, patch ?? {});
+      const model = toSceneModel(updated);
+      setScenes((prev) => [...prev, model]);
+      return model;
+    },
+    [trackerId]
+  );
+
   const regenerateImage = useCallback(async (sceneId: number, promptOverride?: string) => {
     const updated = await regenerateSceneImage(sceneId, promptOverride);
     const model = toSceneModel(updated);
@@ -284,6 +299,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       scenesLoading,
       fetchScenes,
       updateScene,
+      addScene,
       regenerateImage,
     }),
     [
@@ -304,6 +320,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       scenesLoading,
       fetchScenes,
       updateScene,
+      addScene,
       regenerateImage,
     ]
   );

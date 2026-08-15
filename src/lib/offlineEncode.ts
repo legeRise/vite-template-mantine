@@ -25,8 +25,10 @@ import {
 } from 'mediabunny';
 import { getAccessToken, getSceneImageFileUrl, sceneOverlayAlpha } from './api';
 
-/** Number of frames encoded per second of media. */
-const FPS = 30;
+/** Number of frames encoded per second of media. 24 fps is smoother/smaller
+ *  and ~20% faster to encode than 30 fps with no perceptible quality loss
+ *  for web video. */
+const FPS = 24;
 /** Target video codec. VP9 is well supported by WebCodecs and WebM. */
 const VIDEO_CODEC: VideoCodec = 'vp9';
 /** Audio codec for WebM. */
@@ -232,17 +234,16 @@ export async function encodeOffline(params: OfflineEncodeParams): Promise<Offlin
       scenes.find((s) => t >= s.startSeconds && t < s.endSeconds) ?? scenes[scenes.length - 1];
     const img = scene ? images[sceneIndex(scene)] ?? firstImage : firstImage;
     if (scene && img.naturalWidth > 0) {
-      const alpha = alternate ? sceneOverlayAlpha(t - scene.startSeconds) : 1;
+      const alpha = alternate
+        ? sceneOverlayAlpha(t - scene.startSeconds, scene.endSeconds - scene.startSeconds)
+        : 1;
       if (alpha > 0) {
         ctx.globalAlpha = alpha;
         ctx.drawImage(img, 0, 0, OUT_W, OUT_H);
         ctx.globalAlpha = 1;
       }
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(12, 12, 300, 40);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 20px sans-serif';
-      ctx.fillText(`Scene ${String(scene.number).padStart(2, '0')} · ${scene.title}`, 24, 40);
+      // No scene label/number is burned into the video — it is downloadable
+      // separately via the "Download Topics" button.
     }
   };
 
