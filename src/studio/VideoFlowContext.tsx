@@ -97,6 +97,7 @@ interface VideoFlowValue {
   updateScene: (sceneId: number, patch: SceneEditPayload) => Promise<SceneModel>;
   addScene: (patch?: SceneEditPayload) => Promise<SceneModel>;
   regenerateImage: (sceneId: number, promptOverride?: string) => Promise<SceneModel>;
+  openCreation: (trackerId: string, label?: string) => Promise<SceneModel[]>;
 }
 
 const VideoFlowContext = createContext<VideoFlowValue | null>(null);
@@ -236,6 +237,42 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     }
   }, [trackerId]);
 
+  /**
+   * Reopen a PAST creation from history. Loads its scenes into the flow so the
+   * user can preview / re-edit / re-export it after a refresh. Unlike
+   * `fetchScenes`, it works for any owned tracker_id (not just the current one).
+   */
+  const openCreation = useCallback(
+    async (targetTrackerId: string, label?: string) => {
+      stopStreaming();
+      setJobError(null);
+      setScenesLoading(true);
+      try {
+        const res = await getJobScenes(targetTrackerId);
+        setTrackerId(res.tracker_id);
+        setVideoLabel(label ?? `Creation ${res.tracker_id.slice(0, 8)}`);
+        setVideoUrl(resolveMediaUrl(res.original_video_url));
+        setAudioUrl(res.audio_url ? resolveMediaUrl(res.audio_url) : null);
+        setSourceType(
+          res.source_type === 'audio' ? 'audio' : res.source_type === 'video' ? 'video' : null
+        );
+        setJobStatus({
+          tracker_id: res.tracker_id,
+          status: res.status,
+          status_message: res.status === 'completed' ? 'Loaded from history' : res.status,
+          progress: res.status === 'completed' ? 100 : 0,
+        });
+        setJobPhase(res.status === 'failed' ? 'failed' : 'completed');
+        const models = res.scenes.map(toSceneModel);
+        setScenes(models);
+        return models;
+      } finally {
+        setScenesLoading(false);
+      }
+    },
+    [stopStreaming]
+  );
+
   const updateScene = useCallback(
     async (sceneId: number, patch: SceneEditPayload) => {
       if (!trackerId) {
@@ -301,6 +338,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       updateScene,
       addScene,
       regenerateImage,
+      openCreation,
     }),
     [
       isAuthenticated,
@@ -322,6 +360,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       updateScene,
       addScene,
       regenerateImage,
+      openCreation,
     ]
   );
 

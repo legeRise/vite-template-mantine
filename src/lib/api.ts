@@ -304,6 +304,41 @@ export function streamJobStatus(
   return () => controller.abort();
 }
 
+/** A single past creation from the user's history. */
+export interface CreationInfo {
+  id: number;
+  tracker_id: string;
+  script: string;
+  status: string;
+  generated_at: string | null;
+  created_at: string;
+  updated_at: string;
+  video_url: string | null;
+  is_video_available: boolean;
+  source_type?: string | null;
+  resolution?: string | null;
+  scene_count: number;
+  thumbnail: string | null;
+  type: string;
+}
+
+export interface MyCreationsResponse {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: {
+    text2video: CreationInfo[];
+    count: { text2video: number; total: number };
+  };
+}
+
+/** Fetch the current user's past creations (history), newest first. */
+export async function getMyCreations(offset = 0, limit = 50): Promise<MyCreationsResponse> {
+  return request<MyCreationsResponse>(
+    `/api/text2video/my-creations/?offset=${offset}&limit=${limit}`
+  );
+}
+
 /** Step 3 — fetch the generated scenes (with image_url populated). */
 export async function getJobScenes(trackerId: string): Promise<ScenesResponse> {
   return request<ScenesResponse>(`/api/text2video/video-jobs/${trackerId}/scenes/`);

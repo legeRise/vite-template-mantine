@@ -6,6 +6,7 @@ import {
   IconDownload,
   IconEye,
   IconFileText,
+  IconHistory,
   IconMovie,
   IconPhoto,
   IconPlus,
@@ -36,6 +37,7 @@ import {
 } from '@mantine/core';
 import { formatDelta } from '../../lib/api';
 import { useVideoFlow, type SceneModel } from '../VideoFlowContext';
+import { HistoryModal } from './HistoryModal';
 
 /** Build a plain-text document of all scene topics and download it. */
 export function downloadSceneTopics(scenes: SceneModel[]) {
@@ -71,10 +73,11 @@ interface EditorViewProps {
 }
 
 export function EditorView({ scenes, onBack, onOpenPreview, onOpenExport }: EditorViewProps) {
-  const { addScene } = useVideoFlow();
+  const { addScene, openCreation } = useVideoFlow();
   const [activeId, setActiveId] = useState<number>(scenes[0]?.id ?? 1);
   const [addingScene, setAddingScene] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [historyOpened, setHistoryOpened] = useState(false);
   const active = scenes.find((s) => s.id === activeId) ?? scenes[0];
 
   const handleAddScene = async () => {
@@ -88,6 +91,12 @@ export function EditorView({ scenes, onBack, onOpenPreview, onOpenExport }: Edit
     } finally {
       setAddingScene(false);
     }
+  };
+
+  const handleOpenFromHistory = async (trackerId: string, label: string) => {
+    // Reopen a past creation; the editor re-renders with its scenes because
+    // `scenes` is derived from the context, which openCreation updates.
+    await openCreation(trackerId, label);
   };
 
   return (
@@ -107,6 +116,13 @@ export function EditorView({ scenes, onBack, onOpenPreview, onOpenExport }: Edit
           <Text fw={700}>My Video</Text>
         </Group>
         <Group>
+          <Button
+            variant="subtle"
+            leftSection={<IconHistory size={16} />}
+            onClick={() => setHistoryOpened(true)}
+          >
+            History
+          </Button>
           <Button
             variant="light"
             leftSection={<IconFileText size={16} />}
@@ -179,6 +195,13 @@ export function EditorView({ scenes, onBack, onOpenPreview, onOpenExport }: Edit
           <SceneEditor key={active.id} scene={active} />
         </Container>
       )}
+
+      {/* History — reopen any past creation */}
+      <HistoryModal
+        opened={historyOpened}
+        onClose={() => setHistoryOpened(false)}
+        onSelect={(trackerId, label) => void handleOpenFromHistory(trackerId, label)}
+      />
     </Stack>
   );
 }
