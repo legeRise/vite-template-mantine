@@ -356,6 +356,24 @@ export async function patchScene(
   });
 }
 
+/** Response of deleting a scene — includes the updated, re-ordered scene list. */
+export interface DeleteSceneResponse {
+  deleted: boolean;
+  scene_id: number;
+  scenes: SceneDto[];
+}
+
+/** Delete a single scene from a job. */
+export async function deleteScene(
+  trackerId: string,
+  sceneId: number
+): Promise<DeleteSceneResponse> {
+  return request<DeleteSceneResponse>(
+    `/api/text2video/video-jobs/${trackerId}/scenes/${sceneId}/`,
+    { method: 'DELETE' }
+  );
+}
+
 /** Create a new scene, appended to the end of the job (or at a given order). */
 export async function createScene(
   trackerId: string,

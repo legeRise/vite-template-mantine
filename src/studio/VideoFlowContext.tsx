@@ -18,6 +18,7 @@ import {
   streamJobStatus,
   patchScene,
   createScene,
+  deleteScene as apiDeleteScene,
   regenerateSceneImage,
   resolveMediaUrl,
   getAccessToken,
@@ -96,6 +97,7 @@ interface VideoFlowValue {
   fetchScenes: () => Promise<SceneModel[]>;
   updateScene: (sceneId: number, patch: SceneEditPayload) => Promise<SceneModel>;
   addScene: (patch?: SceneEditPayload) => Promise<SceneModel>;
+  deleteScene: (sceneId: number) => Promise<SceneModel[]>;
   regenerateImage: (sceneId: number, promptOverride?: string) => Promise<SceneModel>;
   openCreation: (trackerId: string, label?: string) => Promise<SceneModel[]>;
 }
@@ -299,6 +301,19 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     [trackerId]
   );
 
+  const deleteScene = useCallback(
+    async (sceneId: number) => {
+      if (!trackerId) {
+        throw new Error('No active job');
+      }
+      const res = await apiDeleteScene(trackerId, sceneId);
+      const models = res.scenes.map(toSceneModel);
+      setScenes(models);
+      return models;
+    },
+    [trackerId]
+  );
+
   const regenerateImage = useCallback(async (sceneId: number, promptOverride?: string) => {
     const updated = await regenerateSceneImage(sceneId, promptOverride);
     const model = toSceneModel(updated);
@@ -337,6 +352,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       fetchScenes,
       updateScene,
       addScene,
+      deleteScene,
       regenerateImage,
       openCreation,
     }),
@@ -359,6 +375,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       fetchScenes,
       updateScene,
       addScene,
+      deleteScene,
       regenerateImage,
       openCreation,
     ]

@@ -1,18 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   IconAlertCircle,
-  IconArrowLeft,
   IconCheck,
   IconDownload,
   IconEye,
   IconFileText,
-  IconHistory,
-  IconMovie,
+  IconLock,
+  IconLockOpen,
+  IconMaximize,
+  IconMinimize,
   IconPhoto,
   IconPlus,
-  IconRefresh,
   IconPlayerPause,
   IconPlayerPlay,
+  IconSparkles,
+  IconTrash,
   IconVideo,
 } from '@tabler/icons-react';
 import {
@@ -23,21 +25,19 @@ import {
   Button,
   Card,
   Center,
-  Container,
+  Divider,
+  Grid,
   Group,
-  NumberInput,
-  Paper,
-  SimpleGrid,
+  RangeSlider,
   Stack,
   Text,
   TextInput,
   Textarea,
   ThemeIcon,
-  Title,
+  Tooltip,
 } from '@mantine/core';
 import { formatDelta } from '../../lib/api';
 import { useVideoFlow, type SceneModel } from '../VideoFlowContext';
-import { HistoryModal } from './HistoryModal';
 
 /** Build a plain-text document of all scene topics and download it. */
 export function downloadSceneTopics(scenes: SceneModel[]) {
@@ -67,17 +67,16 @@ export function downloadSceneTopics(scenes: SceneModel[]) {
 
 interface EditorViewProps {
   scenes: SceneModel[];
-  onBack: () => void;
   onOpenPreview: () => void;
   onOpenExport: () => void;
 }
 
-export function EditorView({ scenes, onBack, onOpenPreview, onOpenExport }: EditorViewProps) {
-  const { addScene, openCreation } = useVideoFlow();
+export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewProps) {
+  const { addScene, deleteScene } = useVideoFlow();
   const [activeId, setActiveId] = useState<number>(scenes[0]?.id ?? 1);
   const [addingScene, setAddingScene] = useState(false);
+  const [deletingScene, setDeletingScene] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
-  const [historyOpened, setHistoryOpened] = useState(false);
   const active = scenes.find((s) => s.id === activeId) ?? scenes[0];
 
   const handleAddScene = async () => {
@@ -93,15 +92,26 @@ export function EditorView({ scenes, onBack, onOpenPreview, onOpenExport }: Edit
     }
   };
 
-  const handleOpenFromHistory = async (trackerId: string, label: string) => {
-    // Reopen a past creation; the editor re-renders with its scenes because
-    // `scenes` is derived from the context, which openCreation updates.
-    await openCreation(trackerId, label);
+  // Delete a scene, then keep the editor on a sensible remaining scene.
+  const handleDeleteScene = async (sceneId: number) => {
+    setDeletingScene(true);
+    setAddError(null);
+    try {
+      const remaining = await deleteScene(sceneId);
+      // Select the same position in the new list, or the first remaining one.
+      const idx = scenes.findIndex((s) => s.id === sceneId);
+      const next = remaining[Math.min(Math.max(idx, 0), remaining.length - 1)];
+      setActiveId(next ? next.id : 0);
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : 'Failed to delete scene');
+    } finally {
+      setDeletingScene(false);
+    }
   };
 
   return (
     <Stack gap={0} style={{ minHeight: '100vh' }} bg="var(--app-bg)">
-      {/* Top bar */}
+      {/* Toolbar */}
       <Group
         justify="space-between"
         px="lg"
@@ -109,36 +119,26 @@ export function EditorView({ scenes, onBack, onOpenPreview, onOpenExport }: Edit
         style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
       >
         <Group>
-          <ActionIcon variant="subtle" onClick={onBack} aria-label="Back">
-            <IconArrowLeft size={18} />
-          </ActionIcon>
           <IconVideo size={20} color="var(--mantine-color-violet-6)" />
           <Text fw={700}>My Video</Text>
         </Group>
         <Group>
           <Button
             variant="subtle"
-            leftSection={<IconHistory size={16} />}
-            onClick={() => setHistoryOpened(true)}
-          >
-            History
-          </Button>
-          <Button
-            variant="light"
             leftSection={<IconFileText size={16} />}
             onClick={() => downloadSceneTopics(scenes)}
           >
             Download Topics
           </Button>
           <Button
-            variant="light"
+            variant="subtle"
             leftSection={<IconPlus size={16} />}
             onClick={() => void handleAddScene()}
             loading={addingScene}
           >
             Add Scene
           </Button>
-          <Button variant="light" leftSection={<IconEye size={16} />} onClick={onOpenPreview}>
+          <Button variant="subtle" leftSection={<IconEye size={16} />} onClick={onOpenPreview}>
             Full Preview
           </Button>
           <Button leftSection={<IconDownload size={16} />} onClick={onOpenExport}>
@@ -153,60 +153,57 @@ export function EditorView({ scenes, onBack, onOpenPreview, onOpenExport }: Edit
         </Alert>
       )}
 
-      {/* Timeline */}
-      <Paper
-        p="lg"
-        radius={0}
-        bg="var(--mantine-color-dark-6)"
-        style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
-      >
-        <Stack gap="md">
-          <Group justify="space-between">
-            <Text fw={600} size="sm" c="dimmed" tt="uppercase" style={{ letterSpacing: '0.06em' }}>
-              Timeline
-            </Text>
-            <Group gap="xs">
+      {/* Master–detail layout: scene sidebar on the left, detail editor on the right. */}
+      <Grid gap={0} style={{ flex: 1, alignItems: 'stretch' }}>
+        {/* Scene sidebar */}
+        <Grid.Col
+          span={{ base: 12, md: 3, lg: 3 }}
+          style={{
+            borderRight: '1px solid var(--mantine-color-default-border)',
+            background: 'var(--mantine-color-body)',
+          }}
+        >
+          <Box style={{ position: 'sticky', top: 0, maxHeight: '100vh', overflowY: 'auto' }}>
+            <Group justify="space-between" px="md" py="sm" style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}>
+              <Text fw={600} size="sm" c="dimmed" tt="uppercase" style={{ letterSpacing: '0.08em' }}>
+                Scenes
+              </Text>
               <Badge variant="light" size="sm">
-                {scenes.length} scenes
+                {scenes.length}
               </Badge>
             </Group>
-          </Group>
-          <Group
-            gap="md"
-            align="stretch"
-            wrap="nowrap"
-            style={{ overflowX: 'auto', paddingBottom: 8 }}
-          >
-            {scenes.map((scene) => (
-              <TimelineCard
-                key={scene.id}
-                scene={scene}
-                active={scene.id === active.id}
-                onClick={() => setActiveId(scene.id)}
-              />
-            ))}
-          </Group>
-        </Stack>
-      </Paper>
+            <Stack gap={6} p="sm">
+              {scenes.map((scene) => (
+                <SceneRowItem
+                  key={scene.id}
+                  scene={scene}
+                  active={scene.id === active.id}
+                  onClick={() => setActiveId(scene.id)}
+                />
+              ))}
+            </Stack>
+          </Box>
+        </Grid.Col>
 
-      {/* Detail panel */}
-      {active && (
-        <Container size={760} py="xl">
-          <SceneEditor key={active.id} scene={active} />
-        </Container>
-      )}
-
-      {/* History — reopen any past creation */}
-      <HistoryModal
-        opened={historyOpened}
-        onClose={() => setHistoryOpened(false)}
-        onSelect={(trackerId, label) => void handleOpenFromHistory(trackerId, label)}
-      />
+        {/* Detail editor */}
+        <Grid.Col span={{ base: 12, md: 9, lg: 9 }}>
+          {active && (
+            <SceneEditor
+              key={active.id}
+              scene={active}
+              onDelete={() => void handleDeleteScene(active.id)}
+              allowDelete={scenes.length > 1}
+              deleting={deletingScene}
+            />
+          )}
+        </Grid.Col>
+      </Grid>
     </Stack>
   );
 }
 
-function TimelineCard({
+/** A single row in the left scene sidebar. */
+function SceneRowItem({
   scene,
   active,
   onClick,
@@ -216,51 +213,66 @@ function TimelineCard({
   onClick: () => void;
 }) {
   return (
-    <Card
-      withBorder
-      radius="md"
-      padding={0}
-      style={{
-        width: 120,
-        flexShrink: 0,
-        cursor: 'pointer',
-        borderColor: active ? 'var(--mantine-color-violet-5)' : undefined,
-        borderWidth: active ? 2 : 1,
-        overflow: 'hidden',
-      }}
+    <Box
       onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') onClick();
+      }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: 8,
+        borderRadius: 'var(--mantine-radius-md)',
+        cursor: 'pointer',
+        background: active ? 'var(--mantine-color-violet-0)' : 'transparent',
+        border: '1px solid',
+        borderColor: active ? 'var(--mantine-color-violet-4)' : 'transparent',
+        transition: 'background 120ms ease, border-color 120ms ease',
+      }}
     >
       <Box
         style={{
-          height: 68,
+          width: 48,
+          height: 32,
+          borderRadius: 'var(--mantine-radius-sm)',
           background: scene.imageUrl
             ? `url(${scene.imageUrl}) center / cover`
             : 'var(--mantine-color-violet-1)',
+          flexShrink: 0,
+          overflow: 'hidden',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          overflow: 'hidden',
         }}
       >
-        {!scene.imageUrl && (
-          <ThemeIcon variant="light" radius="xl" size={28}>
-            <IconPhoto size={16} />
-          </ThemeIcon>
-        )}
+        {!scene.imageUrl && <IconPhoto size={14} color="var(--mantine-color-violet-6)" />}
       </Box>
-      <Stack gap={2} p="xs" bg="var(--mantine-color-body)">
-        <Text size="sm" fw={600}>
-          Scene {String(scene.number).padStart(2, '0')}
+      <Stack gap={0} style={{ minWidth: 0 }}>
+        <Text size="sm" fw={600} lineClamp={1}>
+          {String(scene.number).padStart(2, '0')} · {scene.title || `Scene ${String(scene.number).padStart(2, '0')}`}
         </Text>
         <Text size="xs" c="dimmed">
-          {scene.start} · {formatDelta(scene.endSeconds - scene.startSeconds)}
+          {scene.start} — {scene.end}
         </Text>
       </Stack>
-    </Card>
+    </Box>
   );
 }
 
-function SceneEditor({ scene }: { scene: SceneModel }) {
+function SceneEditor({
+  scene,
+  onDelete,
+  allowDelete,
+  deleting,
+}: {
+  scene: SceneModel;
+  onDelete: () => void;
+  allowDelete: boolean;
+  deleting: boolean;
+}) {
   const { updateScene, regenerateImage, videoUrl, audioUrl } = useVideoFlow();
   const [title, setTitle] = useState(scene.title);
   const [prompt, setPrompt] = useState(scene.prompt);
@@ -270,6 +282,10 @@ function SceneEditor({ scene }: { scene: SceneModel }) {
   const [regenerating, setRegenerating] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The prompt is locked (read-only) by default to prevent accidental AI
+  // regenerations that spend credits. Unlock before editing.
+  const [promptLocked, setPromptLocked] = useState(true);
+  const [promptExpanded, setPromptExpanded] = useState(false);
   const saveTimer = useRef<number | null>(null);
 
   const save = async () => {
@@ -314,148 +330,272 @@ function SceneEditor({ scene }: { scene: SceneModel }) {
     }
   };
 
+  const start = typeof startSeconds === 'number' ? startSeconds : Number(startSeconds) || 0;
+  const end = typeof endSeconds === 'number' ? endSeconds : Number(endSeconds) || 0;
+  // Media duration (seconds) surfaces from the sync player so the timing slider
+  // can span the whole clip — letting users trim OR extend the scene duration.
+  const [mediaDuration, setMediaDuration] = useState(0);
+  const sliderMax = Math.max(mediaDuration || 0, end) || 1;
+
+  const PROMPT_MAX = 1000;
+  const PREVIEW_CHARS = 220;
+
   return (
-    <Stack gap="lg">
-      <Group justify="space-between" align="flex-start">
-        <Stack gap={6} style={{ flex: 1 }}>
-          <Title order={3}>Scene {String(scene.number).padStart(2, '0')}</Title>
-          <Text c="dimmed" size="sm">
-            {scene.start} — {scene.end} · {formatDelta(scene.endSeconds - scene.startSeconds)}
-          </Text>
+    <Box py="lg" px="xl">
+      {/* Header: scene number + title + status */}
+      <Group justify="space-between" align="center" wrap="nowrap" mb="lg">
+        <Group gap="md" align="center" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
+          <ThemeIcon variant="light" radius="lg" size={46} color="violet" style={{ flexShrink: 0 }}>
+            <Text fw={700} size="md">
+              {String(scene.number).padStart(2, '0')}
+            </Text>
+          </ThemeIcon>
           <TextInput
             value={title}
             onChange={(e) => setTitle(e.currentTarget.value)}
-            label="Scene title"
-            mt="sm"
+            placeholder="Scene title"
+            size="md"
+            style={{ flex: 1, minWidth: 0, maxWidth: 520 }}
           />
-          <NumberInput
-            value={startSeconds}
-            onChange={setStartSeconds}
-            label="Start"
-            suffix=" sec"
-            min={0}
-            decimalScale={2}
-            clampBehavior="strict"
-          />
-          <NumberInput
-            value={endSeconds}
-            onChange={setEndSeconds}
-            label="End"
-            suffix=" sec"
-            min={0}
-            decimalScale={2}
-            clampBehavior="strict"
-          />
-        </Stack>
+        </Group>
         <Badge
-          variant={scene.edited ? 'filled' : 'light'}
-          size="lg"
+          variant={scene.edited ? 'light' : 'default'}
           color={scene.edited ? 'teal' : 'gray'}
+          size="sm"
         >
-          {scene.edited ? `Edited · ${scene.regenerateCount} regen` : 'Generated'}
+          {scene.edited ? 'Edited' : 'Generated'}
         </Badge>
       </Group>
 
-      {/* Audio/video sync player — set the scene's start/end to the playhead
-          so you can hear exactly where the scene should begin and end. */}
-      <AudioSyncTiming
-        videoUrl={videoUrl}
-        audioUrl={audioUrl}
-        startSeconds={startSeconds}
-        endSeconds={endSeconds}
-        onSetStart={(sec) => setStartSeconds(sec)}
-        onSetEnd={(sec) => setEndSeconds(sec)}
-        sceneDurationSec={formatDelta(scene.endSeconds - scene.startSeconds)}
-      />
-
       {error && (
-        <Alert color="red" icon={<IconAlertCircle size={16} />}>
+        <Alert color="red" icon={<IconAlertCircle size={16} />} mb="lg">
           {error}
         </Alert>
       )}
 
-      {/* Generated image */}
-      <Card withBorder radius="lg" padding="md">
-        <Stack gap="md">
-          <Box
-            style={{
-              width: '100%',
-              aspectRatio: '16 / 9',
-              borderRadius: 'var(--mantine-radius-md)',
-              background: scene.imageUrl
-                ? `url(${scene.imageUrl}) center / cover`
-                : 'var(--mantine-color-violet-1)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              overflow: 'hidden',
-              position: 'relative',
-            }}
-          >
-            {!scene.imageUrl && (
-              <Center style={{ flexDirection: 'column', gap: 8 }}>
-                <ThemeIcon variant="light" radius="xl" size={56}>
-                  <IconPhoto size={26} />
-                </ThemeIcon>
-                <Text size="sm" c="dimmed" fw={600}>
-                  No image generated
-                </Text>
-              </Center>
-            )}
-          </Box>
-
-          <Group justify="space-between" align="center">
-            <Text size="xs" tt="uppercase" c="dimmed" fw={600} style={{ letterSpacing: '0.06em' }}>
-              Scene Image
-            </Text>
-            <Group>
-              <Button
-                size="xs"
-                variant="light"
-                loading={regenerating}
-                leftSection={<IconRefresh size={14} />}
-                onClick={handleRegenerate}
+      <Grid gap="xl">
+        {/* Left column — the generated frame */}
+        <Grid.Col span={{ base: 12, lg: 6 }}>
+          <Card withBorder radius="xl" padding={0} style={{ overflow: 'hidden' }}>
+            <Card.Section>
+              <Box
+                style={{
+                  width: '100%',
+                  aspectRatio: '16 / 9',
+                  background: scene.imageUrl
+                    ? `url(${scene.imageUrl}) center / cover`
+                    : 'var(--mantine-color-violet-1)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  overflow: 'hidden',
+                }}
               >
-                Regenerate Image
-              </Button>
+                {!scene.imageUrl && (
+                  <Center style={{ flexDirection: 'column', gap: 8 }}>
+                    <ThemeIcon variant="light" radius="xl" size={56}>
+                      <IconPhoto size={26} />
+                    </ThemeIcon>
+                    <Text size="sm" c="dimmed" fw={600}>
+                      No image generated
+                    </Text>
+                  </Center>
+                )}
+              </Box>
+            </Card.Section>
+            <Group justify="space-between" align="center" px="md" py="xs">
+              <Text size="xs" tt="uppercase" c="dimmed" fw={600} style={{ letterSpacing: '0.08em' }}>
+                Scene image
+              </Text>
             </Group>
-          </Group>
-          <Text c="dimmed" size="xs">
-            Regenerations: {scene.regenerateCount}
-          </Text>
-        </Stack>
-      </Card>
+          </Card>
+        </Grid.Col>
 
-      {/* Visual prompt */}
-      <Card withBorder radius="lg" padding="lg">
-        <Stack gap="md">
-          <Group justify="space-between">
-            <Text fw={600}>Visual Prompt</Text>
-            <Badge variant="light" size="sm">
-              Image Model
-            </Badge>
-          </Group>
-          <Textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.currentTarget.value)}
-            minRows={4}
-            autosize
-            placeholder="Describe the image you want for this scene..."
-          />
-        </Stack>
-      </Card>
+        {/* Right column — prompt + timing */}
+        <Grid.Col span={{ base: 12, lg: 6 }}>
+          <Stack gap="md" style={{ position: 'sticky', top: 16 }}>
+            {/* Visual prompt */}
+            <Card withBorder radius="xl" padding="lg">
+              <Stack gap="sm">
+                <Group justify="space-between" align="center">
+                  <Group gap="xs">
+                    <Text fw={600} size="sm">
+                      Visual prompt
+                    </Text>
+                    <Badge variant="light" size="sm">
+                      Image model
+                    </Badge>
+                  </Group>
+                  <Tooltip
+                    label={promptLocked ? 'Unlock to edit the prompt' : 'Lock the prompt'}
+                    withArrow
+                  >
+                    <ActionIcon
+                      variant={promptLocked ? 'light' : 'filled'}
+                      color={promptLocked ? 'gray' : 'violet'}
+                      radius="xl"
+                      onClick={() => setPromptLocked((v) => !v)}
+                      aria-label={promptLocked ? 'Unlock prompt' : 'Lock prompt'}
+                    >
+                      {promptLocked ? <IconLock size={16} /> : <IconLockOpen size={16} />}
+                    </ActionIcon>
+                  </Tooltip>
+                </Group>
 
-      <Group justify="flex-end">
-        {saved && (
-          <Text c="teal" size="sm" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <IconCheck size={16} /> Saved
-          </Text>
-        )}
-        <Button leftSection={<IconMovie size={16} />} loading={saving} onClick={save}>
-          Save Scene
-        </Button>
+                {promptLocked ? (
+                  /* Locked — read-only preview with a collapse/expand toggle for long prompts. */
+                  <Box>
+                    <Text size="sm" lh={1.6} lineClamp={promptExpanded ? undefined : 3}>
+                      {prompt || 'No prompt yet — unlock to write a description.'}
+                    </Text>
+                    {prompt.length > PREVIEW_CHARS && (
+                      <Button
+                        size="xs"
+                        variant="subtle"
+                        color="gray"
+                        rightSection={
+                          promptExpanded ? <IconMinimize size={14} /> : <IconMaximize size={14} />
+                        }
+                        mt="xs"
+                        onClick={() => setPromptExpanded((v) => !v)}
+                      >
+                        {promptExpanded ? 'Show less' : 'Show more'}
+                      </Button>
+                    )}
+                  </Box>
+                ) : (
+                  /* Unlocked — editable textarea with a character limit. */
+                  <>
+                    <Textarea
+                      value={prompt}
+                      onChange={(e) => setPrompt(e.currentTarget.value.slice(0, PROMPT_MAX))}
+                      minRows={4}
+                      maxRows={12}
+                      autosize
+                      maxLength={PROMPT_MAX}
+                      placeholder="Describe the image you want for this scene..."
+                    />
+                    <Text size="xs" c="dimmed" ta="right">
+                      {prompt.length}/{PROMPT_MAX}
+                    </Text>
+                  </>
+                )}
+
+                <Divider />
+                <Group justify="space-between" align="center">
+                  <Text size="xs" c="dimmed">
+                    {scene.regenerateCount > 0
+                      ? `Regenerated ${scene.regenerateCount} time${scene.regenerateCount === 1 ? '' : 's'} · uses a credit`
+                      : 'Recreate this frame from the prompt.'}
+                  </Text>
+                  <Tooltip
+                    label={
+                      promptLocked
+                        ? 'Unlock the prompt to change the image with AI'
+                        : 'Recreates the image from this prompt. Uses one AI generation credit.'
+                    }
+                    withArrow
+                  >
+                    <span>
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        color="violet"
+                        disabled={promptLocked}
+                        loading={regenerating}
+                        leftSection={<IconSparkles size={14} />}
+                        onClick={handleRegenerate}
+                      >
+                        Change with AI
+                      </Button>
+                    </span>
+                  </Tooltip>
+                </Group>
+              </Stack>
+            </Card>
+
+            {/* Timing */}
+            <Card withBorder radius="xl" padding="lg">
+              <Stack gap="md">
+                <Group justify="space-between" align="baseline">
+                  <Text fw={600} size="sm">
+                    Timing
+                  </Text>
+                  <Text size="sm" c="dimmed" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                    {formatSecondsLabel(start)} — {formatSecondsLabel(end)}
+                  </Text>
+                </Group>
+
+                <Text c="dimmed" size="xs">
+                  Drag the handles to trim or extend how long this scene plays.
+                </Text>
+
+                <RangeSlider
+                  value={[start, end]}
+                  min={0}
+                  max={sliderMax}
+                  step={0.1}
+                  minRange={0.2}
+                  color="violet"
+                  size="sm"
+                  label={formatSecondsLabel}
+                  labelAlwaysOn
+                  onChange={([s, e]) => {
+                    setStartSeconds(Math.round(s * 100) / 100);
+                    setEndSeconds(Math.round(e * 100) / 100);
+                  }}
+                />
+
+                <Divider />
+
+                <AudioSyncTiming
+                  videoUrl={videoUrl}
+                  audioUrl={audioUrl}
+                  startSeconds={startSeconds}
+                  endSeconds={endSeconds}
+                  onSetStart={(sec) => setStartSeconds(sec)}
+                  onSetEnd={(sec) => setEndSeconds(sec)}
+                  sceneDurationSec={formatDelta(scene.endSeconds - scene.startSeconds)}
+                  onDurationChange={setMediaDuration}
+                />
+              </Stack>
+            </Card>
+          </Stack>
+        </Grid.Col>
+      </Grid>
+
+      {/* Footer — the flow's primary action + destructive delete */}
+      <Divider my="lg" />
+      <Group justify="space-between" align="center" style={{ position: 'sticky', bottom: 0, background: 'var(--mantine-color-body)', padding: '10px 4px', zIndex: 5 }}>
+        <Tooltip
+          label={allowDelete ? 'Remove this scene' : 'Keep at least one scene'}
+          withArrow
+        >
+          <span>
+            <Button
+              variant="subtle"
+              color="red"
+              leftSection={<IconTrash size={16} />}
+              disabled={!allowDelete || deleting}
+              loading={deleting}
+              onClick={onDelete}
+            >
+              Delete Scene
+            </Button>
+          </span>
+        </Tooltip>
+        <Group gap="sm">
+          {saved && (
+            <Text c="teal" size="sm" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <IconCheck size={16} /> Saved
+            </Text>
+          )}
+          <Button leftSection={<IconCheck size={16} />} loading={saving} onClick={save}>
+            Save Scene
+          </Button>
+        </Group>
       </Group>
-    </Stack>
+    </Box>
   );
 }
 
@@ -475,6 +615,7 @@ function AudioSyncTiming({
   onSetStart,
   onSetEnd,
   sceneDurationSec,
+  onDurationChange,
 }: {
   videoUrl: string | null;
   audioUrl: string | null;
@@ -483,6 +624,7 @@ function AudioSyncTiming({
   onSetStart: (sec: number) => void;
   onSetEnd: (sec: number) => void;
   sceneDurationSec: string;
+  onDurationChange?: (duration: number) => void;
 }) {
   const mediaUrl = videoUrl || audioUrl;
   const mediaRef = useRef<HTMLMediaElement | null>(null);
@@ -493,6 +635,15 @@ function AudioSyncTiming({
 
   const start = Number(startSeconds) || 0;
   const end = Number(endSeconds) || 0;
+
+  // Surface the media duration to the parent so the timing slider can span the
+  // whole clip (letting users trim OR extend the scene duration).
+  useEffect(() => {
+    if (onDurationChange && duration > 0) {
+      onDurationChange(duration);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [duration]);
 
   // Seek the strip player to the scene start whenever the component mounts or
   // the start value changes, so playback always starts at the scene's beginning.
@@ -553,121 +704,125 @@ function AudioSyncTiming({
   const playheadPct = duration > 0 ? Math.min(100, (current / duration) * 100) : 0;
 
   return (
-    <Card withBorder radius="lg" padding="md">
-      <Stack gap="sm">
-        <Group justify="space-between">
-          <Text fw={600} size="sm">
-            Sync scene timing to the media
-          </Text>
-          <Text c="dimmed" size="xs">
-            Current scene is {sceneDurationSec} long
-          </Text>
-        </Group>
+    <Stack gap="md">
+      <Text c="dimmed" size="sm">
+        Play the media — at the exact moment the scene should start, tap{' '}
+        <b>Set start</b>; at the moment it should end, tap <b>Set end</b>.
+      </Text>
 
-        <Text c="dimmed" size="xs">
-          Play the source, then press <b>Set start</b> or <b>Set end</b> at the exact moment.
-        </Text>
-
+      {/* Progress bar with the scene's range and the playhead */}
+      <Box
+        style={{
+          position: 'relative',
+          height: 8,
+          borderRadius: 999,
+          background: 'var(--mantine-color-dark-3)',
+          overflow: 'visible',
+        }}
+      >
+        {/* Scene range highlight */}
         <Box
           style={{
-            position: 'relative',
-            height: 6,
+            position: 'absolute',
+            left: `${duration > 0 ? (start / duration) * 100 : 0}%`,
+            width: `${rangePct}%`,
+            height: 8,
+            background: 'var(--mantine-color-violet-5)',
             borderRadius: 999,
-            background: 'var(--mantine-color-dark-4)',
-            overflow: 'visible',
           }}
-        >
-          {/* Scene range highlight */}
-          <Box
-            style={{
-              position: 'absolute',
-              left: `${duration > 0 ? (start / duration) * 100 : 0}%`,
-              width: `${rangePct}%`,
-              height: 6,
-              background: 'var(--mantine-color-violet-6)',
-              borderRadius: 999,
-            }}
-          />
-          {/* Playhead */}
-          <Box
-            style={{
-              position: 'absolute',
-              top: -4,
-              left: `${playheadPct}%`,
-              width: 14,
-              height: 14,
-              borderRadius: '50%',
-              background: 'var(--mantine-color-white)',
-              border: '2px solid var(--mantine-color-violet-6)',
-              transform: 'translateX(-50%)',
-            }}
-          />
-        </Box>
+        />
+        {/* Playhead */}
+        <Box
+          style={{
+            position: 'absolute',
+            top: -4,
+            left: `${playheadPct}%`,
+            width: 16,
+            height: 16,
+            borderRadius: '50%',
+            background: 'var(--mantine-color-white)',
+            border: '3px solid var(--mantine-color-violet-6)',
+            transform: 'translateX(-50%)',
+          }}
+        />
+      </Box>
 
-        <Group gap="sm" justify="space-between">
-          <Group gap="xs">
-            <ActionIcon variant="filled" onClick={togglePlay} aria-label="Play/pause">
-              {playing ? <IconPlayerPause size={16} /> : <IconPlayerPlay size={16} />}
-            </ActionIcon>
-            <Text size="xs" c="dimmed" style={{ fontVariantNumeric: 'tabular-nums' }}>
-              {formatSecondsLabel(current)} / {formatSecondsLabel(duration)}
-            </Text>
-          </Group>
-          <Group gap="xs">
-            <Button
-              size="xs"
-              variant="light"
-              loading={syncing === 'start'}
-              leftSection={<IconMovie size={14} />}
-              onClick={() => {
-                setSyncing('start');
-                onSetStart(Math.round(current * 100) / 100);
-                window.setTimeout(() => setSyncing(null), 600);
-              }}
-            >
-              Set start @ {formatSecondsLabel(current)}
-            </Button>
-            <Button
-              size="xs"
-              variant="light"
-              color="teal"
-              loading={syncing === 'end'}
-              leftSection={<IconMovie size={14} />}
-              onClick={() => {
-                setSyncing('end');
-                onSetEnd(Math.round(current * 100) / 100);
-                window.setTimeout(() => setSyncing(null), 600);
-              }}
-            >
-              Set end @ {formatSecondsLabel(current)}
-            </Button>
-          </Group>
+      <Group gap="sm" justify="space-between" align="center">
+        <Group gap="xs">
+          <ActionIcon variant="filled" radius="xl" onClick={togglePlay} aria-label="Play/pause">
+            {playing ? <IconPlayerPause size={16} /> : <IconPlayerPlay size={16} />}
+          </ActionIcon>
+          <Text size="xs" c="dimmed" style={{ fontVariantNumeric: 'tabular-nums' }}>
+            {formatSecondsLabel(current)} / {formatSecondsLabel(duration)}
+          </Text>
         </Group>
 
-        {/* Hidden media element used only for playback + seeking. */}
-        {videoUrl ? (
-          // eslint-disable-next-line jsx-a11y/media-has-caption
-          <video
-            ref={(el) => {
-              mediaRef.current = el;
+        <Group gap="xs">
+          <Button
+            size="xs"
+            variant="outline"
+            color="violet"
+            loading={syncing === 'start'}
+            onClick={() => {
+              setSyncing('start');
+              onSetStart(Math.round(current * 100) / 100);
+              window.setTimeout(() => setSyncing(null), 500);
             }}
-            src={videoUrl}
-            style={{ display: 'none' }}
-            preload="auto"
-          />
-        ) : audioUrl ? (
-          // eslint-disable-next-line jsx-a11y/media-has-caption
-          <audio
-            ref={(el) => {
-              mediaRef.current = el;
+          >
+            Set start
+          </Button>
+          <Button
+            size="xs"
+            variant="outline"
+            color="teal"
+            loading={syncing === 'end'}
+            onClick={() => {
+              setSyncing('end');
+              onSetEnd(Math.round(current * 100) / 100);
+              window.setTimeout(() => setSyncing(null), 500);
             }}
-            src={audioUrl}
-            style={{ display: 'none' }}
-            preload="auto"
-          />
-        ) : null}
-      </Stack>
-    </Card>
+          >
+            Set end
+          </Button>
+        </Group>
+      </Group>
+
+      {/* Current locked-in values */}
+      <Group gap="xl">
+        <Text size="xs" c="dimmed">
+          Start: <b>{formatSecondsLabel(start)}</b>
+        </Text>
+        <Text size="xs" c="dimmed">
+          End: <b>{formatSecondsLabel(end)}</b>
+        </Text>
+        <Text size="xs" c="dimmed">
+          Length: <b>{sceneDurationSec}</b>
+        </Text>
+      </Group>
+
+      {/* Hidden media element used only for playback + seeking. */}
+      {videoUrl ? (
+        // eslint-disable-next-line jsx-a11y/media-has-caption
+        <video
+          ref={(el) => {
+            mediaRef.current = el;
+          }}
+          src={videoUrl}
+          style={{ display: 'none' }}
+          preload="auto"
+        />
+      ) : audioUrl ? (
+        // eslint-disable-next-line jsx-a11y/media-has-caption
+        <audio
+          ref={(el) => {
+            mediaRef.current = el;
+          }}
+          src={audioUrl}
+          style={{ display: 'none' }}
+          preload="auto"
+        />
+      ) : null}
+    </Stack>
   );
 }
 
