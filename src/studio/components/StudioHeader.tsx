@@ -1,8 +1,8 @@
 import {
-  IconBrandYoutube,
   IconHistory,
   IconLogout,
   IconMovie,
+  IconVideo,
 } from '@tabler/icons-react';
 import { ActionIcon, Button, Group, Text, Tooltip } from '@mantine/core';
 import { useVideoFlow } from '../VideoFlowContext';
@@ -29,34 +29,47 @@ export function StudioHeader({ activeTab, onTabChange, title, right }: StudioHea
       justify="space-between"
       px="lg"
       py="sm"
-      style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
+      wrap="wrap"
+      gap="md"
+      className="app-header"
     >
-      <Group>
-        <Group gap={6}>
-          <IconBrandYoutube size={22} color="var(--mantine-color-violet-6)" />
-          <Text fw={700} size="md">
-            Video to Story
-          </Text>
+      {/* Brand */}
+      <Group gap="sm" wrap="nowrap">
+        <Group className="logo" gap="sm" wrap="nowrap">
+          <span className="logo-mark" aria-hidden>
+            <IconVideo size={18} />
+          </span>
+          <div>
+            <div className="logo-title">Video to Story</div>
+            {title ? (
+              <Text size="xs" c="dimmed" style={{ lineHeight: 1.1 }}>
+                {title}
+              </Text>
+            ) : (
+              <Text size="xs" c="dimmed" style={{ lineHeight: 1.1 }}>
+                Create · Edit · Export
+              </Text>
+            )}
+          </div>
         </Group>
-        {title && (
-          <Text c="dimmed" size="sm" ml="sm">
-            {title}
-          </Text>
-        )}
       </Group>
 
       {/* Top-level navigation tabs */}
       <Group gap={6}>
         <Button
-          variant={activeTab === 'create' ? 'light' : 'subtle'}
+          variant={activeTab === 'create' ? 'filled' : 'subtle'}
+          color={activeTab === 'create' ? 'violet' : 'gray'}
           leftSection={<IconMovie size={16} />}
+          radius="xl"
           onClick={() => onTabChange('create')}
         >
           Create video
         </Button>
         <Button
-          variant={activeTab === 'history' ? 'light' : 'subtle'}
+          variant={activeTab === 'history' ? 'filled' : 'subtle'}
+          color={activeTab === 'history' ? 'violet' : 'gray'}
           leftSection={<IconHistory size={16} />}
+          radius="xl"
           onClick={() => onTabChange('history')}
         >
           Creation history
@@ -66,7 +79,7 @@ export function StudioHeader({ activeTab, onTabChange, title, right }: StudioHea
       <Group>
         {right}
         <Tooltip label="Sign out">
-          <ActionIcon variant="subtle" onClick={logout} aria-label="Sign out">
+          <ActionIcon variant="light" color="gray" radius="xl" onClick={logout} aria-label="Sign out">
             <IconLogout size={18} />
           </ActionIcon>
         </Tooltip>

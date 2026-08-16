@@ -7,8 +7,7 @@ import { EditorView } from './views/EditorView';
 import { ExportView } from './views/ExportView';
 import { HistoryView } from './views/HistoryView';
 import { PreviewModal } from './views/PreviewModal';
-import { ProcessingView } from './views/ProcessingView';
-import { UploadView } from './views/UploadView';
+import { CreateView } from './views/CreateView';
 
 export function Studio() {
   const {
@@ -80,12 +79,12 @@ export function Studio() {
     setPreviewRequest({ sceneId: null, mode: 'full' });
   }, []);
 
-  // Authoritative completion transition: when the job completes while we're on
-  // the processing step, jump straight into the editor (the old "Scene Plan"
-  // page was redundant). This lives at the parent level so child-timer/callback
-  // races cannot leave the UI stuck on 100%.
+  // Authoritative completion transition: when the job completes, jump into the
+  // editor. CreateView handles both 'upload' and 'processing' steps (and calls
+  // onComplete on completion), so this parent-level effect is a robust backstop
+  // that guarantees we can never be left stuck on 100% / "Almost there".
   useEffect(() => {
-    if (step === 'processing' && jobPhase === 'completed') {
+    if ((step === 'upload' || step === 'processing') && jobPhase === 'completed') {
       const t = window.setTimeout(() => {
         setStep('editor');
         window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
@@ -98,7 +97,7 @@ export function Studio() {
     <>
       {/* Not signed in — show only the login/upload screen, no app chrome. */}
       {!isAuthenticated ? (
-        <UploadView onAnalyze={() => go('processing')} />
+        <CreateView onComplete={goAnalysis} />
       ) : (
         <>
           <StudioHeader
@@ -110,16 +109,8 @@ export function Studio() {
             <HistoryView onOpen={handleOpenFromHistory} />
           ) : (
             <>
-              {step === 'upload' && <UploadView onAnalyze={() => go('processing')} />}
-
-              {step === 'processing' && (
-                <ProcessingView
-                  videoLabel={videoLabel}
-                  onComplete={goAnalysis}
-                  failed={jobPhase === 'failed'}
-                  error={jobError}
-                  onRetry={handleStartOver}
-                />
+              {(step === 'upload' || step === 'processing') && (
+                <CreateView onComplete={goAnalysis} />
               )}
 
               {step === 'editor' && scenes.length > 0 && (

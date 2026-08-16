@@ -30,6 +30,7 @@ import {
   Divider,
   Grid,
   Group,
+  Select,
   Stack,
   Text,
   TextInput,
@@ -37,7 +38,13 @@ import {
   ThemeIcon,
   Tooltip,
 } from '@mantine/core';
-import { formatDelta, sceneOverlayAlpha } from '../../lib/api';
+import {
+  formatDelta,
+  sceneOverlayAlpha,
+  sceneTransitionOpacity,
+  sceneTransitionTransform,
+  type SceneTransition,
+} from '../../lib/api';
 import { useVideoFlow, type SceneModel } from '../VideoFlowContext';
 
 /** Build a plain-text document of all scene topics and download it. */
@@ -73,8 +80,17 @@ interface EditorViewProps {
 }
 
 export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewProps) {
-  const { addScene, deleteScene, moveSceneBoundary, moveSceneStart, undo, redo, videoUrl, audioUrl } =
-    useVideoFlow();
+  const {
+    addScene,
+    deleteScene,
+    moveSceneBoundary,
+    moveSceneStart,
+    resizeSceneEnd,
+    undo,
+    redo,
+    videoUrl,
+    audioUrl,
+  } = useVideoFlow();
   const [activeId, setActiveId] = useState<number>(scenes[0]?.id ?? 1);
   // Follows the playhead during playback (drives the sidebar/timeline highlight)
   // so the scene list visually progresses as the video moves from scene to scene.
@@ -85,6 +101,16 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
   // Increments on every manual scene selection so the inline player reliably
   // seeks + highlights the clicked scene even if it's ALREADY the active one.
   const [seekToken, setSeekToken] = useState(0);
+  // Exact time (seconds) the user clicked/scrubbed on the timeline — lets the
+  // playhead start from an arbitrary point (possibly mid-scene), then it's
+  // reset to null so a later, identical click still re-seeks.
+  const [seekTime, setSeekTime] = useState<number | null>(null);
+  // Real duration (seconds) of the source media — the timeline uses it to mark
+  // where the footage ends and to highlight scenes that overrun it.
+  const [videoDuration, setVideoDuration] = useState<number | null>(null);
+  // Live playhead time (seconds) reported by the inline player, so the timeline
+  // can draw a visible scrub head at the exact position.
+  const [playheadTime, setPlayheadTime] = useState(0);
   const active = scenes.find((s) => s.id === activeId) ?? scenes[0];
 
   // Manual selection: make it authoritative for highlight AND force a seek.
@@ -124,6 +150,16 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
       await moveSceneStart(sceneId, newStart);
     } catch (err) {
       setAddError(err instanceof Error ? err.message : 'Could not update scene timing');
+    }
+  };
+
+  // Called by the timeline when the OVERFLOWING last scene's right edge is
+  // dragged (to pull its tail back within the video).
+  const handleResizeEnd = (sceneId: number, newEnd: number) => {
+    try {
+      resizeSceneEnd(sceneId, newEnd);
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : 'Could not resize the scene');
     }
   };
 
@@ -217,6 +253,10 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
           onSelect={selectScene}
           onMoveBoundary={handleMoveBoundary}
           onMoveStart={handleMoveStart}
+          onResizeEnd={handleResizeEnd}
+          onSeek={(time) => setSeekTime(time)}
+          videoDuration={videoDuration}
+          playheadTime={playheadTime}
         />
       </Box>
 
@@ -265,7 +305,10 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
                     scenes={scenes}
                     activeScene={active}
                     seekToken={seekToken}
+                    seekTime={seekTime}
                     onSceneChange={setHighlightId}
+                    onDuration={setVideoDuration}
+                    onPlayhead={setPlayheadTime}
                   />
                 )}
               </Box>
@@ -362,12 +405,28 @@ function SceneTimeline({
   onSelect,
   onMoveBoundary,
   onMoveStart,
+  onResizeEnd,
+  onSeek,
+  videoDuration,
+  playheadTime,
 }: {
   scenes: SceneModel[];
   activeId: number;
   onSelect: (id: number) => void;
   onMoveBoundary: (sceneId: number, newEnd: number) => void;
   onMoveStart: (sceneId: number, newStart: number) => void;
+  /** Called when the OVERFLOWING last scene's right edge is dragged — lets the
+   *  user pull the tail back within the video length. */
+  onResizeEnd?: (sceneId: number, newEnd: number) => void;
+  /** Called with an exact time (seconds) when the user clicks/scrubs the track
+   *  to seek the playhead there (may be mid-scene). */
+  onSeek?: (seconds: number) => void;
+  /** Real source-media duration (seconds). When provided, scenes whose end
+   *  exceeds this are flagged as "extended beyond the video" so the user can
+   *  adjust neighbours to fit. */
+  videoDuration?: number | null;
+  /** Live playhead time (seconds) — draws a visible scrub head on the track. */
+  playheadTime?: number;
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{
@@ -380,15 +439,30 @@ function SceneTimeline({
     maxBound: number;
     startClientX: number;
     total: number;
+    resizeTail?: boolean; // true when dragging the overflowing LAST scene's right edge
   } | null>(null);
   const [dragInfo, setDragInfo] = useState<{ newBound: number } | null>(null);
   // Which boundary is hovered (key like "left-<id>" / "right-<id>") so the
   // thin visible divider can highlight subtly before the user grabs it.
   const [hoverBoundary, setHoverBoundary] = useState<string | null>(null);
+  // True while the user is dragging the playhead to scrub; lets the track keep
+  // seeking on pointer-move instead of only on a single click.
+  const scrubbingRef = useRef(false);
+
+  const seekFromClientX = (clientX: number) => {
+    const el = trackRef.current;
+    if (!el || !onSeek) return;
+    const rect = el.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    onSeek(frac * total);
+  };
 
   const lastId = scenes[scenes.length - 1]?.id;
   // Fixed total = video length. Never changes during a boundary drag.
   const total = Math.max(1, ...scenes.map((s) => s.endSeconds));
+  // Where the real footage ends (if known). Scenes past this overrun the video.
+  const mediaEnd = videoDuration && videoDuration > 0 ? videoDuration : total;
+  const hasOverflow = mediaEnd < total;
 
   const beginDrag = (e: React.PointerEvent, scene: SceneModel, side: 'left' | 'right') => {
     e.stopPropagation();
@@ -399,17 +473,23 @@ function SceneTimeline({
     const prev = scenes[idx - 1];
     const next = scenes[idx + 1];
     if (side === 'right') {
-      if (!next) return; // last scene has no right boundary
+      // The last scene normally has no right boundary (fixed total). BUT if it
+      // OVERFLOWS past the video, let the user drag its right edge in to pull
+      // the tail back within the footage.
+      if (!next && !(onResizeEnd && scene.endSeconds > mediaEnd + 0.05)) return;
+      const resizeTail = !next;
       dragRef.current = {
         sceneId: scene.id,
         side,
         sceneStart: scene.startSeconds,
         sceneEnd: scene.endSeconds,
         origBound: scene.endSeconds,
+        // Shrink only (pull the right edge in toward the footage end).
         minBound: scene.startSeconds + 0.3,
-        maxBound: next.endSeconds - 0.3,
+        maxBound: scene.endSeconds,
         startClientX: e.clientX,
         total,
+        resizeTail,
       };
     } else {
       if (!prev) return; // first scene has no left boundary
@@ -450,8 +530,13 @@ function SceneTimeline({
       const newBound = Math.min(Math.max(raw, drag.minBound), drag.maxBound);
       const bounded = Math.round(newBound * 100) / 100;
       if (Math.abs(bounded - drag.origBound) > 0.1) {
-        if (drag.side === 'right') onMoveBoundary(drag.sceneId, bounded);
-        else onMoveStart(drag.sceneId, bounded);
+        if (drag.resizeTail) {
+          onResizeEnd?.(drag.sceneId, bounded);
+        } else if (drag.side === 'right') {
+          onMoveBoundary(drag.sceneId, bounded);
+        } else {
+          onMoveStart(drag.sceneId, bounded);
+        }
       }
     }
     dragRef.current = null;
@@ -478,8 +563,50 @@ function SceneTimeline({
     <Stack gap={8}>
       <Box
         ref={trackRef}
-        onPointerMove={moveDrag}
-        onPointerUp={endDrag}
+        onPointerDown={(e) => {
+          // Grab the playhead: seek to the exact point and keep scrubbing while
+          // the pointer moves (so the user can drag the head anywhere). Scene
+          // blocks stopPropagation, so this fires on the track background AND on
+          // the dedicated playhead handle (see playhead marker below, which is
+          // also the scrub grab point at higher z-index).
+          if (dragInfo) return; // not while resizing a scene boundary
+          if (!onSeek) return;
+          scrubbingRef.current = true;
+          seekFromClientX(e.clientX);
+          const el = trackRef.current;
+          if (el) {
+            try {
+              el.setPointerCapture(e.pointerId);
+            } catch {
+              /* no-op */
+            }
+          }
+        }}
+        onPointerMove={(e) => {
+          if (scrubbingRef.current) {
+            seekFromClientX(e.clientX);
+            return;
+          }
+          moveDrag(e);
+        }}
+        onPointerUp={(e) => {
+          if (scrubbingRef.current) {
+            scrubbingRef.current = false;
+            const el = trackRef.current;
+            if (el) {
+              try {
+                el.releasePointerCapture(e.pointerId);
+              } catch {
+                /* no-op */
+              }
+            }
+            return;
+          }
+          endDrag(e);
+        }}
+        onPointerCancel={() => {
+          scrubbingRef.current = false;
+        }}
         style={{
           position: 'relative',
           height: 72,
@@ -490,6 +617,7 @@ function SceneTimeline({
           overflow: 'hidden',
           userSelect: 'none',
           touchAction: 'none',
+          cursor: 'pointer',
         }}
       >
         {/* Time ruler ticks + start/end */}
@@ -513,10 +641,121 @@ function SceneTimeline({
           {formatSecondsLabel(total)}
         </Text>
 
+        {/* Video-end boundary + overflow region: if any scene extends past the
+            real footage length, shade that region red and mark the end line so
+            the user sees exactly how much overruns and can adjust neighbours. */}
+        {hasOverflow && (
+          <>
+            <Box
+              style={{
+                position: 'absolute',
+                left: `${(mediaEnd / total) * 100}%`,
+                top: 0,
+                bottom: 0,
+                width: 2,
+                background: 'var(--mantine-color-red-6)',
+                zIndex: 2,
+                pointerEvents: 'none',
+              }}
+            />
+            <Box
+              style={{
+                position: 'absolute',
+                left: `${(mediaEnd / total) * 100}%`,
+                right: 0,
+                top: 0,
+                bottom: 0,
+                background: 'rgba(250,82,82,0.12)',
+                borderLeft: '2px dashed var(--mantine-color-red-6)',
+                zIndex: 1,
+                pointerEvents: 'none',
+              }}
+            />
+            <Badge
+              size="xs"
+              color="red"
+              variant="filled"
+              style={{ position: 'absolute', left: `${(mediaEnd / total) * 100}%`, top: -6, transform: 'translateX(-50%)', zIndex: 4, pointerEvents: 'none' }}
+            >
+              video ends
+            </Badge>
+          </>
+        )}
+
+        {/* Playhead — a DRAGGABLE scrub head. Grab it and drag anywhere on the
+            track to scrub playback to that exact time (works over scene blocks
+            thanks to pointer capture; the wide hitbox + higher z-index win over
+            the scene hitboxes underneath). */}
+        {playheadTime != null && playheadTime >= 0 && (
+          <Box
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              scrubbingRef.current = true;
+              seekFromClientX(e.clientX);
+              const el = trackRef.current;
+              if (el) {
+                try {
+                  el.setPointerCapture(e.pointerId);
+                } catch {
+                  /* no-op */
+                }
+              }
+            }}
+            style={{
+              position: 'absolute',
+              left: `${Math.min(100, Math.max(0, (playheadTime / total) * 100))}%`,
+              top: 0,
+              bottom: 0,
+              zIndex: 8,
+              width: 22,
+              transform: 'translateX(-50%)',
+              cursor: 'ew-resize',
+              display: 'flex',
+              alignItems: 'stretch',
+            }}
+            role="slider"
+            aria-label="Scrub playhead"
+            aria-valuemin={0}
+            aria-valuemax={Math.round(total)}
+            aria-valuenow={Math.round(playheadTime)}
+          >
+            <Box
+              style={{
+                position: 'absolute',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                top: 0,
+                bottom: 0,
+                width: 3,
+                background: '#fff',
+                boxShadow: '0 0 0 1px rgba(124,58,237,0.35), 0 0 8px rgba(255,255,255,0.8)',
+                pointerEvents: 'none',
+              }}
+            />
+            <Box
+              style={{
+                position: 'absolute',
+                top: -3,
+                left: '50%',
+                transform: 'translateX(-50%)',
+                width: 0,
+                height: 0,
+                borderLeft: '7px solid transparent',
+                borderRight: '7px solid transparent',
+                borderTop: '9px solid #fff',
+                filter: 'drop-shadow(0 1px 2px rgba(124,58,237,0.4))',
+                pointerEvents: 'none',
+              }}
+            />
+          </Box>
+        )}
+
         {scenes.map((scene, i) => {
           const isLast = scene.id === lastId;
           const isFirst = i === 0;
           const isActive = scene.id === activeId;
+          // A scene "overflows" when it extends past the real footage length.
+          const overflows = scene.endSeconds > mediaEnd + 0.05;
           const drag = dragRef.current;
           const dragging = drag && dragInfo && drag.sceneId === scene.id;
           const dragLeftNeighbor = drag && dragInfo && drag.side === 'left' && scenes[i + 1]?.id === drag.sceneId;
@@ -540,6 +779,7 @@ function SceneTimeline({
               key={scene.id}
               onPointerDown={(e) => {
                 if (dragInfo) return;
+                e.stopPropagation(); // scene click = scene-start seek, not track seek
                 onSelect(scene.id);
               }}
               style={{
@@ -558,14 +798,19 @@ function SceneTimeline({
                 alignItems: 'center',
                 justifyContent: 'center',
                 boxSizing: 'border-box',
-                border: isActive ? '2px solid rgba(255,255,255,0.45)' : 'none',
+                border: isActive
+                  ? '2px solid rgba(255,255,255,0.45)'
+                  : overflows
+                  ? '2px solid var(--mantine-color-red-6)'
+                  : 'none',
+                boxShadow: overflows ? '0 0 0 1px var(--mantine-color-red-6)' : undefined,
                 minWidth: 22,
                 transition: 'background 120ms ease',
               }}
             >
               <Stack gap={0} align="center" style={{ pointerEvents: 'none', minWidth: 0 }}>
                 <Text size="sm" fw={700} c="white" lh={1.2}>
-                  {String(scene.number).padStart(2, '0')}
+                  {overflows ? '⚠' : String(scene.number).padStart(2, '0')}
                 </Text>
                 {width > 7 && (
                   <Text size="xs" c="white" opacity={0.9} lh={1.2} style={{ whiteSpace: 'nowrap' }}>
@@ -609,8 +854,9 @@ function SceneTimeline({
                 </Box>
               )}
 
-              {/* Draggable boundary between this scene and the next. */}
-              {!isLast && (
+              {/* Draggable boundary — between scenes, OR the right edge of an
+                  overflowing last scene (so its tail can be pulled back in). */}
+              {(!isLast || (isLast && overflows && !!onResizeEnd)) && (
                 <Box
                   onPointerDown={(e) => beginDrag(e, scene, 'right')}
                   onMouseEnter={() => setHoverBoundary(`right-${scene.id}`)}
@@ -684,6 +930,16 @@ function SceneTimeline({
           </Badge>
         </Group>
       </Group>
+
+      {/* Overflow warning — a scene extends past the footage, so the user can
+          pull neighbours' edges to bring it back within the video. */}
+      {hasOverflow && (
+        <Text size="xs" c="red" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 2px' }}>
+          <IconAlertCircle size={14} />
+          Some scenes extend past the video length — drag a scene edge to fit it
+          back within the footage ({formatDelta(mediaEnd)}).
+        </Text>
+      )}
     </Stack>
   );
 }
@@ -700,7 +956,10 @@ function InlinePreview({
   scenes,
   activeScene,
   seekToken,
+  seekTime,
   onSceneChange,
+  onDuration,
+  onPlayhead,
 }: {
   videoUrl: string | null;
   audioUrl: string | null;
@@ -709,14 +968,40 @@ function InlinePreview({
   /** Increments on every manual scene click so the player re-seeks even if the
    *  clicked scene == the currently active scene. */
   seekToken: number;
+  /** When non-null and changes, the playhead jumps to this EXACT time (may be
+   *  mid-scene — e.g. the user clicked/scrubbed the timeline at an arbitrary
+   *  point). Playback starts there if it was already playing, else it stays
+   *  paused at that spot. */
+  seekTime: number | null;
   /** Called when the playhead enters a new scene (so the sidebar can follow). */
   onSceneChange?: (sceneId: number) => void;
+  /** Called with the real media duration (seconds) once known. */
+  onDuration?: (seconds: number) => void;
+  /** Called with the current playhead time (seconds) when it changes, so the
+   *  timeline can draw a live scrub head. */
+  onPlayhead?: (seconds: number) => void;
 }) {
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [playTime, setPlayTime] = useState(0);
   const [controlsVisible, setControlsVisible] = useState(false);
   const hasMedia = !!videoUrl || !!audioUrl;
+
+  // Report the real media duration (seconds) up once it's known, so the
+  // timeline can show where the footage ends and highlight any overflow.
+  useEffect(() => {
+    const el = mediaRef.current;
+    if (!el || !onDuration) return;
+    const report = () => {
+      if (Number.isFinite(el.duration) && el.duration > 0) onDuration(el.duration);
+    };
+    el.addEventListener('loadedmetadata', report);
+    el.addEventListener('durationchange', report);
+    return () => {
+      el.removeEventListener('loadedmetadata', report);
+      el.removeEventListener('durationchange', report);
+    };
+  }, [onDuration]);
 
   // When the selected scene changes (user click on a sidebar/timeline item),
   // seek the playhead to that scene's start and PAUSE, so the highlight lands
@@ -736,6 +1021,18 @@ function InlinePreview({
       setPlayTime(target);
     }
   }, [activeScene.id, activeScene.startSeconds, seekToken]);
+
+  // Exact-point seeking: when the parent asks to jump to an arbitrary time
+  // (mid-scene timeline click/scrub), seek there. If already playing, continue
+  // from that precise point; otherwise land paused there.
+  useEffect(() => {
+    if (seekTime == null) return;
+    const el = mediaRef.current;
+    if (!el) return;
+    const t = Math.max(0, Math.min(seekTime, isFinite(el.duration) ? el.duration : seekTime));
+    el.currentTime = t;
+    setPlayTime(t);
+  }, [seekTime]);
 
   const startPlayback = () => {
     const el = mediaRef.current;
@@ -760,12 +1057,23 @@ function InlinePreview({
     scenes.find((s) => playTime >= s.startSeconds && playTime < s.endSeconds) ??
     scenes[scenes.length - 1] ??
     null;
+  const overlaySceneElapsed = overlayScene
+    ? playTime - overlayScene.startSeconds
+    : 0;
+  const overlaySceneDuration = overlayScene
+    ? overlayScene.endSeconds - overlayScene.startSeconds
+    : 8;
   const overlayAlpha = overlayScene?.imageUrl
-    ? sceneOverlayAlpha(
-        playTime - overlayScene.startSeconds,
-        overlayScene.endSeconds - overlayScene.startSeconds
+    ? sceneTransitionOpacity(
+        overlayScene.transition,
+        overlaySceneElapsed,
+        overlaySceneDuration
       )
     : 0;
+  const overlayTransform =
+    overlayScene?.transition === 'kenburns'
+      ? sceneTransitionTransform(overlaySceneElapsed, overlaySceneDuration)
+      : undefined;
 
   // Notify the parent whenever the playhead moves into a different scene so the
   // sidebar/timeline highlight can follow along.
@@ -775,6 +1083,11 @@ function InlinePreview({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overlayScene?.id]);
+
+  // Report the raw playhead time up so the timeline can draw a live scrub head.
+  useEffect(() => {
+    if (onPlayhead) onPlayhead(playTime);
+  }, [playTime, onPlayhead]);
 
   return (
     <Card withBorder radius="xl" padding={0} style={{ overflow: 'hidden' }}>
@@ -836,6 +1149,9 @@ function InlinePreview({
                 height: '100%',
                 objectFit: 'cover',
                 opacity: overlayAlpha,
+                // Ken Burns: apply a slow zoom to the image.
+                transform: overlayTransform,
+                willChange: overlayTransform ? 'transform' : undefined,
                 pointerEvents: 'none',
               }}
             />
@@ -1203,6 +1519,31 @@ function SceneEditor({
                 {aiReason}
               </Text>
             )}
+          </Stack>
+        </Card>
+
+        {/* Transition — how this scene's image is shown over the footage */}
+        <Card withBorder radius="xl" padding="lg">
+          <Stack gap="sm">
+            <Text fw={600} size="sm">
+              Transition
+            </Text>
+            <Text size="xs" c="dimmed">
+              How the scene image plays over your footage.
+            </Text>
+            <Select
+              data={[
+                { value: 'cut', label: 'Cut — plain switch' },
+                { value: 'fade', label: 'Fade to black' },
+                { value: 'crossfade', label: 'Crossfade with footage' },
+                { value: 'kenburns', label: 'Ken Burns (slow zoom)' },
+              ]}
+              value={scene.transition}
+              onChange={(value) => {
+                if (!value) return;
+                updateScene(scene.id, { transition: value as SceneTransition });
+              }}
+            />
           </Stack>
         </Card>
       </Stack>

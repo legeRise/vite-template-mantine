@@ -8,6 +8,21 @@ export const API_BASE_URL: string = (
 ).replace(/\/+$/, '');
 
 // ---------------------------------------------------------------------------
+// Video → Scenes upload options
+// ---------------------------------------------------------------------------
+
+// The 4 supported languages for the video->scenes flow. The backend / Deepgram
+// no longer auto-guesses: the user MUST pick one before uploading.
+export const LANGUAGE_OPTIONS = [
+  { value: 'english', label: 'English' },
+  { value: 'urdu', label: 'Urdu' },
+  { value: 'hindi', label: 'Hindi' },
+  { value: 'other', label: 'Other / Auto-detect' },
+] as const;
+
+export type VideoLanguage = (typeof LANGUAGE_OPTIONS)[number]['value'];
+
+// ---------------------------------------------------------------------------
 // Auth / token storage
 // ---------------------------------------------------------------------------
 
@@ -66,6 +81,9 @@ export interface JobStatus {
   original_video_url?: string | null;
 }
 
+/** How a scene's image is presented over the footage. */
+export type SceneTransition = 'cut' | 'fade' | 'crossfade' | 'kenburns';
+
 export interface SceneDto {
   scene_id: number;
   order: number;
@@ -81,6 +99,7 @@ export interface SceneDto {
   edited: boolean;
   edited_at: string | null;
   regenerate_count: number;
+  transition: SceneTransition;
 }
 
 export interface ScenesResponse {
@@ -107,6 +126,7 @@ export interface SceneEditPayload {
   pause_after?: number;
   start?: number;
   end?: number;
+  transition?: SceneTransition;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,8 +193,14 @@ export async function uploadVideoForScenes(params: {
   file: File;
   template?: string;
   resolution?: string;
-  language?: string;
+  language: VideoLanguage; // Required: the user always picks one of the 4 languages.
   noHumans?: boolean;
+  /**
+   * Optional callback fired with upload progress (0–100). `fetch` can't report
+   * this, so when set we switch to `XMLHttpRequest` (the only reliable way to
+   * measure how many bytes of the file have actually been sent).
+   */
+  onUploadProgress?: (percent: number) => void;
 }): Promise<UploadVideoResponse> {
   const form = new FormData();
   form.append('file', params.file);
@@ -184,16 +210,78 @@ export async function uploadVideoForScenes(params: {
   if (params.resolution) {
     form.append('resolution', params.resolution);
   }
-  if (params.language) {
-    form.append('language', params.language);
-  }
+  // Language is always sent (required by the backend).
+  form.append('language', params.language);
   if (params.noHumans) {
     form.append('no_humans', 'true');
+  }
+
+  // Real upload progress requires XMLHttpRequest (fetch has no upload events).
+  if (params.onUploadProgress) {
+    return uploadVideoForScenesXhr(form, params.onUploadProgress);
   }
 
   return request<UploadVideoResponse>('/api/text2video/upload-video-for-scenes/', {
     method: 'POST',
     body: form,
+  });
+}
+
+/**
+ * POST a multipart FormData via XMLHttpRequest so we can report reliable upload
+ * progress. Returns the same `UploadVideoResponse` shape as `request`, and
+ * throws an Error (with message) on failure, mirroring `request`'s behaviour.
+ */
+function uploadVideoForScenesXhr(
+  form: FormData,
+  onUploadProgress: (percent: number) => void
+): Promise<UploadVideoResponse> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const url = `${API_BASE_URL}/api/text2video/upload-video-for-scenes/`;
+
+    xhr.open('POST', url);
+    const token = getAccessToken();
+    if (token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    }
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        const pct = Math.min(100, Math.max(0, Math.round((e.loaded / e.total) * 100)));
+        onUploadProgress(pct);
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Network error while uploading the file.'));
+    xhr.onabort = () => reject(new Error('Upload was cancelled.'));
+
+    xhr.onload = () => {
+      let data: UploadVideoResponse | null = null;
+      try {
+        data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        data = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        if (!data) {
+          reject(new Error('Upload failed: empty response from server.'));
+          return;
+        }
+        resolve(data);
+        return;
+      }
+      const message =
+        (data && (data as { detail?: string; message?: string }).detail) ||
+        (data && (data as { detail?: string; message?: string }).message) ||
+        `Upload failed (${xhr.status})`;
+      const err = new Error(message) as Error & { status: number; data?: unknown };
+      err.status = xhr.status;
+      err.data = data;
+      reject(err);
+    };
+
+    xhr.send(form);
   });
 }
 
@@ -452,9 +540,15 @@ export function getSceneImageFileUrl(sceneId: number): string {
 
 /**
  * True when the given file is an audio file (m4a/mp3/wav/ogg/aac/opus/flac).
+ *
+ * NOTE: this list MUST match the backend's audio detection exactly
+ * (text2video/views.py upload_video_for_scenes). `.webm` is deliberately
+ * excluded — WebM can be video or audio, and the backend treats it as video,
+ * so we must too (otherwise a webm video would be loaded in an `<audio>`
+ * element for duration detection and report a wrong duration).
  */
 export function isAudioFile(file: File): boolean {
-  return /\.(mp3|wav|m4a|aac|ogg|opus|flac|webm)$/i.test(file.name);
+  return /\.(mp3|wav|m4a|aac|ogg|opus|flac)$/i.test(file.name);
 }
 
 // ---------------------------------------------------------------------------
@@ -510,4 +604,51 @@ export function sceneOverlayAlpha(elapsed: number, sceneDuration = 8): number {
   if (elapsed < p1) return elapsed / FADE; // fade in (person -> image)
   if (elapsed < p2) return 1; // image only (held)
   return Math.max(0, 1 - (elapsed - p2) / FADE); // fade out (image -> person)
+}
+
+/**
+ * Opacity of the scene image at a playback position given the scene's chosen
+ * TRANSITION. Falls back to the classic single-fade behaviour for 'cut'.
+ *
+ * Keeps the same default "image title card" feel but lets each scene pick a
+ * different presentation:
+ *   - cut       -> default single fade-in/hold/fade-out (existing behaviour)
+ *   - fade      -> the image fades in, and at the END also fades out to black
+ *                  (soft dip) before the next scene.
+ *   - crossfade -> the image cross-fades with the video (image opacity ramps
+ *                  up then back down once per scene).
+ *   - kenburns  -> the image is shown full during its moment, but with a slow
+ *                  zoom (see sceneTransitionTransform); opacity stays high.
+ */
+export function sceneTransitionOpacity(
+  transition: SceneTransition,
+  elapsed: number,
+  sceneDuration = 8
+): number {
+  if (transition === 'fade') {
+    const FADE_IN = 0.6;
+    const FADE_OUT = 0.6;
+    const hold = Math.max(0, sceneDuration - FADE_IN - FADE_OUT);
+    if (elapsed < FADE_IN) return elapsed / FADE_IN;
+    if (elapsed < FADE_IN + hold) return 1;
+    return Math.max(0, 1 - (elapsed - (FADE_IN + hold)) / FADE_OUT);
+  }
+  if (transition === 'kenburns') {
+    // Sky image for its whole on-screen window, with Ken Burns motion.
+    return 1;
+  }
+  // 'cut' and 'crossfade' reuse the classic single-fade title-card opacity.
+  return sceneOverlayAlpha(elapsed, sceneDuration);
+}
+
+/**
+ * CSS transform for Ken Burns motion at a playback position. Produces a slow
+ * zoom (optionally with a slight pan) so the still image feels alive.
+ */
+export function sceneTransitionTransform(elapsed: number, sceneDuration = 8): string {
+  const TOTAL = Math.max(sceneDuration, 1);
+  const t = Math.min(1, Math.max(0, elapsed / TOTAL)); // 0..1 through the scene
+  // Scale from 1.0 -> ~1.18 (gentle zoom-in) over the scene's on-screen window.
+  const scale = 1 + t * 0.18;
+  return `scale(${scale.toFixed(3)})`;
 }

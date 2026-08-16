@@ -14,7 +14,12 @@ import {
   ThemeIcon,
   Title,
 } from '@mantine/core';
-import { getAccessToken, getSceneImageFileUrl, sceneOverlayAlpha } from '../../lib/api';
+import {
+  getAccessToken,
+  getSceneImageFileUrl,
+  sceneOverlayAlpha,
+  sceneTransitionOpacity,
+} from '../../lib/api';
 import { encodeOffline, isOfflineEncodingSupported } from '../../lib/offlineEncode';
 import type { SceneModel } from '../VideoFlowContext';
 
@@ -168,17 +173,33 @@ export function ExportView({
           ctx.fillRect(0, 0, canvas.width, canvas.height);
         }
 
-        // 2) Draw the active scene's image over the source.
+        // 2) Draw the active scene's image over the source, honoring its
+        // transition (fade / crossfade / Ken Burns).
         const scene =
           scenes.find((s) => t >= s.startSeconds && t < s.endSeconds) ?? scenes[scenes.length - 1];
         const img = scene ? (images[scenes.indexOf(scene)] ?? firstLoadedImage) : firstLoadedImage;
         if (scene && img.naturalWidth > 0) {
+          const elapsed = t - scene.startSeconds;
+          const dur = scene.endSeconds - scene.startSeconds;
           const alpha = alternate
-            ? sceneOverlayAlpha(t - scene.startSeconds, scene.endSeconds - scene.startSeconds)
+            ? sceneTransitionOpacity(scene.transition, elapsed, dur)
             : 1;
           if (alpha > 0) {
             ctx.globalAlpha = alpha;
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            if (scene.transition === 'kenburns') {
+              // Slow zoom: crop a progressively smaller (zoomed-in) region of
+              // the image so it appears to move, then draw it full-canvas.
+              const durSafe = Math.max(dur, 1);
+              const zoomT = Math.min(1, Math.max(0, elapsed / durSafe));
+              const crop = 1 - zoomT * 0.16; // shrink source rect = zoom in
+              const sw = img.naturalWidth * crop;
+              const sh = img.naturalHeight * crop;
+              const sx = (img.naturalWidth - sw) / 2;
+              const sy = (img.naturalHeight - sh) / 2;
+              ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+            } else {
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            }
             ctx.globalAlpha = 1;
           }
           // NOTE: no scene label/number is burned into the video — the scene

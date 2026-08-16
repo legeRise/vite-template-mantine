@@ -25,6 +25,8 @@ import {
   getAccessToken,
   clearTokens,
   formatSeconds,
+  type VideoLanguage,
+  type SceneTransition,
 } from '../lib/api';
 
 /**
@@ -47,6 +49,7 @@ export interface SceneModel {
   edited: boolean;
   regenerateCount: number;
   order: number;
+  transition: SceneTransition;
 }
 
 function toSceneModel(dto: SceneDto): SceneModel {
@@ -66,10 +69,55 @@ function toSceneModel(dto: SceneDto): SceneModel {
     edited: dto.edited,
     regenerateCount: dto.regenerate_count,
     order: dto.order,
+    transition: dto.transition ?? 'cut',
   };
 }
 
-export type JobPhase = 'uploading' | 'processing' | 'completed' | 'failed';
+/**
+ * Regenerate images for any scene that failed to get one on the first pass.
+ * Called after the scenes list loads so that NO scene is ever left without its
+ * first image (the backend silently skips failed generations, leaving them null).
+ *
+ * Iterates over the missing scenes, calling the backend regenerate endpoint for
+ * each with a short delay, and only stops once every scene has an image or we
+ * hit MAX_ATTEMPTS (to avoid an infinite retry loop on a hard failure). Scenes
+ * that keep failing are left for the user to retry manually.
+ */
+async function backfillMissingImages(models: SceneModel[], setScenes: (updater: (prev: SceneModel[]) => SceneModel[]) => void): Promise<void> {
+  const MAX_ATTEMPTS = 3;
+  const DELAY_MS = 1200;
+
+  let missing = models.filter((s) => !s.imageUrl);
+  let attempt = 0;
+  while (missing.length > 0 && attempt < MAX_ATTEMPTS) {
+    attempt += 1;
+    // Try each missing scene; collect the ones that still have no image.
+    const stillMissing: SceneModel[] = [];
+    for (const scene of missing) {
+      try {
+        const updated = await regenerateSceneImage(scene.id);
+        const model = toSceneModel(updated);
+        // MERGE IN PLACE ONLY — never append a scene whose id isn't already in
+        // the list. This guarantees the backfill can never duplicate scenes
+        // (regenerate returns the SAME scene id, so it updates in place).
+        setScenes((prev) =>
+          prev.some((p) => p.id === model.id)
+            ? prev.map((p) => (p.id === model.id ? model : p))
+            : prev
+        );
+        if (!model.imageUrl) stillMissing.push(model);
+      } catch {
+        // Transient failure — keep it in the missing list for the next attempt.
+        stillMissing.push(scene);
+      }
+      // Brief pause between calls so we don't hammer the image service.
+      await new Promise((r) => window.setTimeout(r, DELAY_MS));
+    }
+    missing = stillMissing.filter((s) => !s.imageUrl);
+  }
+}
+
+export type JobPhase = 'idle' | 'uploading' | 'processing' | 'completed' | 'failed';
 
 interface VideoFlowValue {
   // Auth
@@ -86,9 +134,11 @@ interface VideoFlowValue {
   jobStatus: JobStatus | null;
   jobPhase: JobPhase;
   jobError: string | null;
+  /** 0–100 while the file is being uploaded over the network (0 when idle). */
+  uploadProgress: number;
   uploadAndStart: (
     file: File,
-    opts?: { template?: string; resolution?: string; language?: string; noHumans?: boolean }
+    opts: { template?: string; resolution?: string; language: VideoLanguage; noHumans?: boolean }
   ) => Promise<void>;
   reset: () => void;
 
@@ -104,6 +154,9 @@ interface VideoFlowValue {
   /** Move the boundary between the previous scene and this one (fixed total duration).
    *  This drags the scene's LEFT edge. */
   moveSceneStart: (sceneId: number, newStart: number) => SceneModel[];
+  /** Resize the last scene's END directly (so an overflowing tail can be dragged
+   *  back within the video). */
+  resizeSceneEnd: (sceneId: number, newEnd: number) => void;
   regenerateImage: (sceneId: number, promptOverride?: string) => Promise<SceneModel>;
   /** "Change with AI" — revise a scene's prompt from a short instruction, then regenerate. */
   changeWithAI: (sceneId: number, instruction: string) => Promise<SceneModel>;
@@ -128,8 +181,9 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
   const [sourceType, setSourceType] = useState<'video' | 'audio' | null>(null);
   const [trackerId, setTrackerId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
-  const [jobPhase, setJobPhase] = useState<JobPhase>('uploading');
+  const [jobPhase, setJobPhase] = useState<JobPhase>('idle');
   const [jobError, setJobError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [scenes, setScenes] = useState<SceneModel[]>([]);
   const [scenesLoading, setScenesLoading] = useState(false);
   // Undo/redo history stacks of scene snapshots.
@@ -180,7 +234,8 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     setAudioUrl(null);
     setSourceType(null);
     setJobStatus(null);
-    setJobPhase('uploading');
+    setJobPhase('idle');
+    setUploadProgress(0);
     setVideoLabel('');
     setScenes([]);
     setJobError(null);
@@ -197,7 +252,8 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     setAudioUrl(null);
     setSourceType(null);
     setJobStatus(null);
-    setJobPhase('uploading');
+    setJobPhase('idle');
+    setUploadProgress(0);
     setVideoLabel('');
     setScenes([]);
     setJobError(null);
@@ -234,20 +290,22 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
   const uploadAndStart = useCallback(
     async (
       file: File,
-      opts?: { template?: string; resolution?: string; language?: string; noHumans?: boolean }
+      opts: { template?: string; resolution?: string; language: VideoLanguage; noHumans?: boolean }
     ) => {
       stopStreaming();
       setJobError(null);
       setJobPhase('uploading');
+      setUploadProgress(0);
       setScenes([]);
 
       try {
         const res = await uploadVideoForScenes({
           file,
-          template: opts?.template,
-          resolution: opts?.resolution,
-          language: opts?.language || 'en-US',
-          noHumans: opts?.noHumans,
+          template: opts.template,
+          resolution: opts.resolution,
+          language: opts.language,
+          noHumans: opts.noHumans,
+          onUploadProgress: setUploadProgress,
         });
         setVideoLabel(file.name);
         setTrackerId(res.tracker_id);
@@ -279,6 +337,11 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       setSourceType(res.source_type === 'audio' ? 'audio' : res.source_type === 'video' ? 'video' : null);
       const models = res.scenes.map(toSceneModel);
       setScenes(models);
+      // Backfill any scenes that came back without an image (the backend's
+      // first-pass generation occasionally fails / times out on some scenes).
+      // Regenerate those a few times until every scene has a first image, so
+      // the scenes list is never left with a missing one.
+      void backfillMissingImages(models, setScenes);
       return models;
     } finally {
       setScenesLoading(false);
@@ -341,8 +404,12 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
           ...s,
           title: patch.scene_title ?? s.title,
           prompt: patch.image_prompt ?? s.prompt,
+          description: patch.description ?? s.description,
+          narration: patch.narration ?? s.narration,
+          pauseAfter: patch.pause_after ?? s.pauseAfter,
           startSeconds: patch.start ?? s.startSeconds,
           endSeconds: patch.end ?? s.endSeconds,
+          transition: patch.transition ?? s.transition,
           edited: true,
         };
       });
@@ -470,6 +537,35 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
         })
       );
       return scenesRef.current;
+    },
+    [trackerId, recordHistory]
+  );
+
+  /**
+   * Resize the LAST scene's END in place (shrink/expand the tail). Unlike
+   * `moveSceneBoundary` (which needs a right-hand neighbour), this is used so
+   * an overflowing scene that extends past the video length can be dragged back
+   * in from its right edge. `newEnd` is clamped to stay within [start+0.3, end].
+   */
+  const resizeSceneEnd = useCallback(
+    (sceneId: number, newEnd: number) => {
+      if (!trackerId) {
+        throw new Error('No active job');
+      }
+      const scene = scenesRef.current.find((s) => s.id === sceneId);
+      if (!scene) return;
+      const cleaned = Math.round(newEnd * 100) / 100;
+      const minBound = scene.startSeconds + 0.3;
+      // Only allow shrinking/extending the tail up to its current end (so a
+      // drag can pull it back within the footage, but never silently grow it).
+      const maxBound = scene.endSeconds;
+      const bounded = Math.min(Math.max(cleaned, minBound), maxBound);
+      if (Math.abs(bounded - scene.endSeconds) < 0.05) return;
+
+      recordHistory();
+      setScenes((prev) =>
+        prev.map((s) => (s.id === sceneId ? { ...s, endSeconds: bounded, edited: true } : s))
+      );
     },
     [trackerId, recordHistory]
   );
@@ -616,6 +712,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       jobStatus,
       jobPhase,
       jobError,
+      uploadProgress,
       uploadAndStart,
       reset,
       scenes,
@@ -626,6 +723,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       deleteScene,
       moveSceneBoundary,
       moveSceneStart,
+      resizeSceneEnd,
       regenerateImage,
       changeWithAI,
       openCreation,
@@ -647,6 +745,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       jobStatus,
       jobPhase,
       jobError,
+      uploadProgress,
       uploadAndStart,
       reset,
       scenes,
@@ -657,6 +756,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       deleteScene,
       moveSceneBoundary,
       moveSceneStart,
+      resizeSceneEnd,
       regenerateImage,
       changeWithAI,
       openCreation,

@@ -3,12 +3,66 @@
 }
 
 body {
+  /* App-wide subtle violet gradient (matches the create page) so every page —
+     create, editor, export, history — shares the same polished look. */
+  background:
+    radial-gradient(1200px 600px at 50% -120px, rgba(124, 58, 237, 0.14), transparent 60%),
+    radial-gradient(700px 400px at -120px 120px, rgba(99, 102, 241, 0.08), transparent 60%),
+    radial-gradient(700px 400px at calc(100% + 80px) 220px, rgba(217, 70, 239, 0.08), transparent 60%),
+    linear-gradient(180deg, #f1ecfb 0%, #f8f9fb 34%, #f8f9fb 100%);
+  background-attachment: fixed;
   background-color: var(--app-bg);
   color: #1c1c1e;
+  min-height: 100vh;
 }
 
 [data-mantine-color-scheme='dark'] body {
-  background-color: #101113;
+  background: #101113;
+}
+
+/* Prominent app header: a clean, distinct brand bar. Lighter frosted surface
+   with a strong shadow so it clearly reads as the app chrome (not a gray
+   strip), while the page gradient shows through just a touch. */
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-bottom: 1px solid rgba(124, 58, 237, 0.18);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7), 0 6px 24px rgba(76, 29, 149, 0.10);
+}
+
+.app-header .logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 14px;
+  margin-right: 4px;
+  border-right: 1px solid rgba(124, 58, 237, 0.14);
+}
+
+.app-header .logo-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--mantine-color-violet-6), var(--mantine-color-indigo-6));
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.40), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.app-header .logo-title {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.015em;
+  background: linear-gradient(135deg, var(--mantine-color-violet-8), var(--mantine-color-indigo-7));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  line-height: 1.15;
 }
 
 @keyframes spin {
