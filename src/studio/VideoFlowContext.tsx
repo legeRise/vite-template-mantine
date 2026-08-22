@@ -49,6 +49,7 @@ export interface SceneModel {
   regenerateCount: number;
   order: number;
   transition: SceneTransition;
+  locked: boolean;
 }
 
 /**
@@ -80,6 +81,7 @@ function toSceneModel(dto: SceneDto): SceneModel {
     regenerateCount: dto.regenerate_count,
     order: dto.order,
     transition: dto.transition ?? 'kenburns',
+    locked: true,
   };
 }
 
@@ -431,6 +433,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
           startSeconds: patch.start ?? s.startSeconds,
           endSeconds: patch.end ?? s.endSeconds,
           transition: patch.transition ?? s.transition,
+          locked: patch.locked ?? s.locked,
           edited: true,
         };
       });
@@ -447,7 +450,7 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       }
       recordHistory();
       const updated = await createScene(trackerId, patch ?? {});
-      const model = toSceneModel(updated);
+      const model = { ...toSceneModel(updated), locked: true };
       setScenes((prev) => [...prev, model]);
       return model;
     },

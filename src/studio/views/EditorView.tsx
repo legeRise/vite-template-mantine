@@ -6,6 +6,8 @@ import {
   IconDownload,
   IconEye,
   IconFileText,
+  IconLock,
+  IconLockOpen,
   IconPhoto,
   IconPlus,
   IconPlayerPause,
@@ -89,13 +91,16 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
     moveScene,
     undo,
     redo,
+    updateScene,
     videoUrl,
     audioUrl,
   } = useVideoFlow();
-  const [activeId, setActiveId] = useState<number>(scenes[0]?.id ?? 1);
-  // Follows the playhead during playback (drives the sidebar/timeline highlight)
-  // so the scene list visually progresses as the video moves from scene to scene.
-  const [highlightId, setHighlightId] = useState<number | null>(null);
+  // User intent: the scene the user selected in the editor. This stays stable
+  // even while playback highlight follows the playhead elsewhere.
+  const [selectedSceneId, setSelectedSceneId] = useState<number>(scenes[0]?.id ?? 1);
+  // Playback highlight: follows the media playhead, so the preview/timeline can
+  // visually track the current scene without conflating it with user selection.
+  const [playbackSceneId, setPlaybackSceneId] = useState<number | null>(null);
   const [addingScene, setAddingScene] = useState(false);
   const [deletingScene, setDeletingScene] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
@@ -114,16 +119,22 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
   const [playheadTime, setPlayheadTime] = useState(0);
   // Phones stack the layout: preview first, then a capped-height scene list.
   const isNarrow = useMediaQuery('(max-width: 62em)');
-  const active = scenes.find((s) => s.id === activeId) ?? scenes[0];
+  const isPhonePortrait = useMediaQuery('(max-width: 767px) and (orientation: portrait)');
+  const selectedScene = scenes.find((s) => s.id === selectedSceneId) ?? scenes[0];
 
-  // Manual selection: make it authoritative for highlight AND force a seek.
+  // Manual selection: reset the playhead to the beginning of the chosen scene,
+  // but do not overwrite an in-scene scrub position that was already chosen by
+  // the user while editing. The playback highlight can still follow the current
+  // playhead independently of this selection.
   const selectScene = (id: number) => {
-    setActiveId(id);
-    setHighlightId(id);
+    setSelectedSceneId(id);
+    setPlaybackSceneId(id);
+    setSeekTime(null);
     setSeekToken((t) => t + 1);
   };
-  // The highlighted scene: follows playback if playing, otherwise the selection.
-  const highlighted = scenes.find((s) => s.id === (highlightId ?? activeId)) ?? active;
+  // Playback highlight: if playback is active, it can diverge from the selection
+  // without wiping the user's explicit scene choice.
+  const highlightedScene = scenes.find((s) => s.id === playbackSceneId) ?? selectedScene;
 
   // Ctrl/Cmd + Z = undo, Ctrl/Cmd + Shift + Z = redo.
   useEffect(() => {
@@ -163,7 +174,8 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
     setAddError(null);
     try {
       const newScene = await addScene();
-      setActiveId(newScene.id);
+      setSelectedSceneId(newScene.id);
+      setPlaybackSceneId(newScene.id);
     } catch (err) {
       setAddError(err instanceof Error ? err.message : 'Failed to add scene');
     } finally {
@@ -180,7 +192,8 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
       // Select the same position in the new list, or the first remaining one.
       const idx = scenes.findIndex((s) => s.id === sceneId);
       const next = remaining[Math.min(Math.max(idx, 0), remaining.length - 1)];
-      setActiveId(next ? next.id : 0);
+      setSelectedSceneId(next ? next.id : 0);
+      setPlaybackSceneId(next ? next.id : 0);
     } catch (err) {
       setAddError(err instanceof Error ? err.message : 'Failed to delete scene');
     } finally {
@@ -233,24 +246,59 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
         </Alert>
       )}
 
+      {isPhonePortrait && (
+        <Alert
+          color="yellow"
+          icon={<IconAlertCircle size={16} />}
+          m="md"
+          title="Rotate to landscape for editing"
+        >
+          This editor is optimized for landscape mode on phone screens. Please rotate your device before trimming or moving scenes.
+        </Alert>
+      )}
+
       {/* Timeline — the primary timing surface: drag a scene's edge to resize it.
           Quiet surface around it so the timeline stays the visual anchor. */}
       <Box px="lg" py="md" bg="var(--ez-surface-2)" style={{ borderBottom: '1px solid var(--ez-line)' }}>
-        <Group justify="space-between" mb="xs">
+        <Group justify="space-between" mb="xs" align="center">
           <Text fw={600} size="sm" c="dimmed" tt="uppercase" style={{ letterSpacing: '0.08em' }}>
             Timeline
           </Text>
-          <Text size="xs" c="dimmed">
-            Drag scene edges to trim · drag a scene to slide it · empty space shows raw footage ·{' '}
-            {scenes.length} scenes
-          </Text>
+          <Group gap="xs">
+            <Text size="xs" c="dimmed">
+              Drag scene edges to trim · drag a scene to slide it · empty space shows raw footage ·{' '}
+              {scenes.length} scenes
+            </Text>
+            {selectedScene && (
+              <Tooltip label={selectedScene.locked ? 'Click to unlock scene' : 'Click to lock scene'} withArrow>
+                <Button
+                  size="compact-xs"
+                  variant={selectedScene.locked ? 'filled' : 'light'}
+                  color="violet"
+                  leftSection={selectedScene.locked ? <IconLock size={13} /> : <IconLockOpen size={13} />}
+                  onClick={() => updateScene(selectedScene.id, { locked: !selectedScene.locked })}
+                  styles={{
+                    root: {
+                      borderColor: selectedScene.locked ? 'rgba(124,108,246,0.4)' : 'rgba(124,108,246,0.32)',
+                    },
+                  }}
+                >
+                  {selectedScene.locked ? 'Locked' : 'Lock'}
+                </Button>
+              </Tooltip>
+            )}
+          </Group>
         </Group>
         <SceneTimeline
           scenes={scenes}
-          activeId={highlighted.id}
+          activeId={selectedSceneId}
           onSelect={selectScene}
           onResize={handleResizeScene}
           onMoveScene={handleMoveScene}
+          onToggleLock={(sceneId) => {
+            const scene = scenes.find((entry) => entry.id === sceneId);
+            if (scene) updateScene(sceneId, { locked: !scene.locked });
+          }}
           onSeek={(time) => setSeekTime(time)}
           videoDuration={videoDuration}
           playheadTime={playheadTime}
@@ -290,8 +338,9 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
                 <SceneRowItem
                   key={scene.id}
                   scene={scene}
-                  active={scene.id === highlighted.id}
+                  active={scene.id === selectedSceneId}
                   onClick={() => selectScene(scene.id)}
+                  onToggleLock={() => updateScene(scene.id, { locked: !scene.locked })}
                 />
               ))}
             </Stack>
@@ -304,15 +353,15 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
             {/* Persistent full-preview viewer — clicking a scene seeks it here. */}
             <Grid.Col span={{ base: 12, lg: 5 }} style={{ padding: 'var(--mantine-spacing-lg)' }}>
               <Box style={{ position: 'sticky', top: 16 }}>
-                {active && (
+                {selectedScene && (
                   <InlinePreview
                     videoUrl={videoUrl}
                     audioUrl={audioUrl}
                     scenes={scenes}
-                    activeScene={active}
+                    activeScene={selectedScene}
                     seekToken={seekToken}
                     seekTime={seekTime}
-                    onSceneChange={setHighlightId}
+                    onSceneChange={setPlaybackSceneId}
                     onDuration={setVideoDuration}
                     onPlayhead={setPlayheadTime}
                   />
@@ -321,11 +370,11 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
             </Grid.Col>
             {/* Per-scene editor */}
             <Grid.Col span={{ base: 12, lg: 7 }}>
-              {active && (
+              {selectedScene && (
                 <SceneEditor
-                  key={active.id}
-                  scene={active}
-                  onDelete={() => void handleDeleteScene(active.id)}
+                  key={selectedScene.id}
+                  scene={selectedScene}
+                  onDelete={() => void handleDeleteScene(selectedScene.id)}
                   allowDelete={scenes.length > 1}
                   deleting={deletingScene}
                 />
@@ -343,14 +392,30 @@ function SceneRowItem({
   scene,
   active,
   onClick,
+  onToggleLock,
 }: {
   scene: SceneModel;
   active: boolean;
   onClick: () => void;
+  onToggleLock?: () => void;
 }) {
+  const lastTapRef = useRef<{ time: number } | null>(null);
+
+  const handlePointerDown = () => {
+    const now = Date.now();
+    const lastTap = lastTapRef.current;
+    if (lastTap && now - lastTap.time < 300) {
+      lastTapRef.current = null;
+      onToggleLock?.();
+      return;
+    }
+    lastTapRef.current = { time: now };
+    onClick();
+  };
+
   return (
     <Box
-      onClick={onClick}
+      onPointerDown={handlePointerDown}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
@@ -389,9 +454,20 @@ function SceneRowItem({
         {!scene.imageUrl && <IconPhoto size={14} color="var(--ez-accent)" />}
       </Box>
       <Stack gap={0} style={{ minWidth: 0 }}>
-        <Text size="sm" fw={600} lineClamp={1}>
-          {String(scene.number).padStart(2, '0')} · {scene.title || `Scene ${String(scene.number).padStart(2, '0')}`}
-        </Text>
+        <Group gap={6} align="center" wrap="nowrap">
+          <Text size="sm" fw={600} lineClamp={1}>
+            {String(scene.number).padStart(2, '0')} · {scene.title || `Scene ${String(scene.number).padStart(2, '0')}`}
+          </Text>
+          {scene.locked ? (
+            <ThemeIcon size={18} radius="xl" variant="light" color="brand" title="Locked">
+              <IconLock size={12} />
+            </ThemeIcon>
+          ) : (
+            <ThemeIcon size={18} radius="xl" variant="light" color="teal" title="Unlocked">
+              <IconLockOpen size={12} />
+            </ThemeIcon>
+          )}
+        </Group>
         <Text size="xs" c="dimmed">
           {scene.start} — {scene.end}
         </Text>
@@ -417,6 +493,7 @@ function SceneTimeline({
   onSelect,
   onResize,
   onMoveScene,
+  onToggleLock,
   onSeek,
   videoDuration,
   playheadTime,
@@ -428,6 +505,8 @@ function SceneTimeline({
   onResize: (sceneId: number, side: 'start' | 'end', newTime: number) => void;
   /** Called continuously while a whole scene is slid (duration preserved). */
   onMoveScene?: (sceneId: number, newStart: number) => void;
+  /** Toggle the lock state for a scene when the user double-taps it. */
+  onToggleLock?: (sceneId: number) => void;
   /** Called with an exact time (seconds) when the user clicks/scrubs the track
    *  to seek the playhead there (may be mid-scene). */
   onSeek?: (seconds: number) => void;
@@ -438,6 +517,7 @@ function SceneTimeline({
   playheadTime?: number;
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
+  const lastTapRef = useRef<{ sceneId: number; time: number } | null>(null);
   const [trackWidth, setTrackWidth] = useState(0);
 
   // Total track length: the real media duration when known; otherwise fall
@@ -450,8 +530,22 @@ function SceneTimeline({
   const pxPerSec = trackWidth > 0 ? trackWidth / total : 800 / total;
 
   type Drag =
-    | { kind: 'edge'; sceneId: number; side: 'start' | 'end'; origTime: number; startClientX: number }
-    | { kind: 'move'; sceneId: number; origStart: number; startClientX: number; moved: boolean };
+    | {
+        kind: 'edge';
+        sceneId: number;
+        side: 'start' | 'end';
+        origTime: number;
+        startClientX: number;
+        started: boolean;
+      }
+    | {
+        kind: 'move';
+        sceneId: number;
+        origStart: number;
+        startClientX: number;
+        moved: boolean;
+        started: boolean;
+      };
   const dragRef = useRef<Drag | null>(null);
   // Floating timecode pill shown above the dragged edge/clip.
   const [dragLabel, setDragLabel] = useState<{ xPct: number; text: string } | null>(null);
@@ -507,12 +601,17 @@ function SceneTimeline({
 
   const beginEdgeDrag = (e: React.PointerEvent, scene: SceneModel, side: 'start' | 'end') => {
     e.stopPropagation();
+    if (scene.locked) {
+      onSelect(scene.id);
+      return;
+    }
     dragRef.current = {
       kind: 'edge',
       sceneId: scene.id,
       side,
       origTime: side === 'start' ? scene.startSeconds : scene.endSeconds,
       startClientX: e.clientX,
+      started: false,
     };
     const el = trackRef.current;
     if (el) {
@@ -526,12 +625,17 @@ function SceneTimeline({
 
   const beginMoveDrag = (e: React.PointerEvent, scene: SceneModel) => {
     e.stopPropagation();
+    if (scene.locked) {
+      onSelect(scene.id);
+      return;
+    }
     dragRef.current = {
       kind: 'move',
       sceneId: scene.id,
       origStart: scene.startSeconds,
       startClientX: e.clientX,
       moved: false,
+      started: false,
     };
     const el = trackRef.current;
     if (el) {
@@ -553,6 +657,14 @@ function SceneTimeline({
     if (!drag || !el) return;
     const dt = (e.clientX - drag.startClientX) / pxPerSec;
 
+    if (!drag.started) {
+      if (Math.abs(e.clientX - drag.startClientX) > 4) {
+        drag.started = true;
+      } else {
+        return;
+      }
+    }
+
     if (drag.kind === 'edge') {
       const raw = drag.origTime + dt;
       const snapped = applySnap(raw, snapTargets(drag.sceneId));
@@ -566,8 +678,11 @@ function SceneTimeline({
 
     // Whole-scene slide: only commit after a small threshold so a plain click
     // stays a selection, not a jittery move.
-    if (Math.abs(e.clientX - drag.startClientX) > 4) drag.moved = true;
-    if (!drag.moved || !onMoveScene) return;
+    if (Math.abs(e.clientX - drag.startClientX) > 4) {
+      drag.moved = true;
+      drag.started = true;
+    }
+    if (!drag.started || !drag.moved || !onMoveScene) return;
     const scene = scenes.find((s) => s.id === drag.sceneId);
     if (!scene) return;
     const dur = scene.endSeconds - scene.startSeconds;
@@ -784,7 +899,25 @@ function SceneTimeline({
           return (
             <Box
               key={scene.id}
-              onPointerDown={(e) => beginMoveDrag(e, scene)}
+              onPointerDown={(e) => {
+                const now = Date.now();
+                const lastTap = lastTapRef.current;
+                if (lastTap && lastTap.sceneId === scene.id && now - lastTap.time < 300) {
+                  lastTapRef.current = null;
+                  e.stopPropagation();
+                  onToggleLock?.(scene.id);
+                  return;
+                }
+
+                lastTapRef.current = { sceneId: scene.id, time: now };
+
+                if (scene.locked) {
+                  e.stopPropagation();
+                  onSelect(scene.id);
+                  return;
+                }
+                beginMoveDrag(e, scene);
+              }}
               role="button"
               tabIndex={-1}
               aria-label={`Scene ${scene.number}: ${scene.title}`}
@@ -834,6 +967,25 @@ function SceneTimeline({
                 )}
               </Stack>
 
+              {scene.locked && (
+                <ThemeIcon
+                  size={18}
+                  radius="xl"
+                  variant="light"
+                  color="brand"
+                  title="Locked"
+                  style={{
+                    position: 'absolute',
+                    top: 6,
+                    right: 6,
+                    zIndex: 4,
+                    border: '1px solid rgba(0,0,0,0.15)',
+                  }}
+                >
+                  <IconLock size={12} />
+                </ThemeIcon>
+              )}
+
               {/* LEFT edge handle — trim this scene's start. Wide hitbox so it
                   is easy to grab (and touch-friendly); brightens on hover via
                   the active state. */}
@@ -845,11 +997,12 @@ function SceneTimeline({
                   top: 0,
                   bottom: 0,
                   width: 24,
-                  cursor: 'ew-resize',
+                  cursor: scene.locked ? 'default' : 'ew-resize',
                   zIndex: 3,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
+                  opacity: scene.locked ? 0.6 : 1,
                 }}
               >
                 <Box
@@ -872,11 +1025,12 @@ function SceneTimeline({
                   top: 0,
                   bottom: 0,
                   width: 24,
-                  cursor: 'ew-resize',
+                  cursor: scene.locked ? 'default' : 'ew-resize',
                   zIndex: 3,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
+                  opacity: scene.locked ? 0.6 : 1,
                 }}
               >
                 <Box
@@ -996,23 +1150,24 @@ function InlinePreview({
     };
   }, [onDuration]);
 
-  // When the selected scene changes (user click on a sidebar/timeline item),
-  // seek the playhead to that scene's start and PAUSE, so the highlight lands
-  // reliably on the scene the user clicked and stays there (full control).
-  // It never fires during plain playback, so continuous playing is never
-  // interrupted at scene boundaries. The seekToken dep guarantees a re-seek on
-  // EVERY click, even when clicking the scene that is already active.
+  // An explicit scene selection should jump to that scene's start. A scrubbed
+  // mid-scene playhead should be preserved until the user explicitly chooses a
+  // different scene or timeline point. This avoids the snap-back bug where the
+  // player keeps resetting to a scene origin after the user has already scrubbed
+  // inside the scene.
   useEffect(() => {
     const el = mediaRef.current;
     if (!el) return;
+
     const target = Math.max(0, activeScene.startSeconds);
+    const shouldJumpToSceneStart = seekToken > 0 && Math.abs(el.currentTime - target) > 0.05;
+
+    if (!shouldJumpToSceneStart) return;
+
     el.pause();
     setPlaying(false);
-    // Only move if we're meaningfully off-target (avoid jitter on same-spot).
-    if (Math.abs(el.currentTime - target) > 0.05 || !playing) {
-      el.currentTime = target;
-      setPlayTime(target);
-    }
+    el.currentTime = target;
+    setPlayTime(target);
   }, [activeScene.id, activeScene.startSeconds, seekToken]);
 
   // Exact-point seeking: when the parent asks to jump to an arbitrary time
@@ -1030,9 +1185,10 @@ function InlinePreview({
   const startPlayback = () => {
     const el = mediaRef.current;
     if (!el) return;
-    el.currentTime = Math.max(0, activeScene.startSeconds);
+    const nextTime = playTime > 0 ? playTime : Math.max(0, activeScene.startSeconds);
+    el.currentTime = nextTime;
     setPlaying(true);
-    setPlayTime(activeScene.startSeconds);
+    setPlayTime(nextTime);
     void el.play().catch(() => undefined);
   };
 

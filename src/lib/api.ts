@@ -127,6 +127,7 @@ export interface SceneEditPayload {
   start?: number;
   end?: number;
   transition?: SceneTransition;
+  locked?: boolean;
 }
 
 // ---------------------------------------------------------------------------
