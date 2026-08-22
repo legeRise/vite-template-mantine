@@ -1,62 +1,27 @@
 /* ===========================================================================
-   Design tokens — the single visual language for the editing tool.
-   Dark (default editing canvas) + Light (same product, not an inverted dark mode).
-   Components should consume these --ez-* variables (or light-dark(...)) rather
-   than hardcoding raw hex.
+   Design tokens are centralized in src/theme.ts and applied as CSS variables via
+   App.tsx. This file keeps only the app-shell, generic tokens, and utility CSS.
    =========================================================================== */
 
-/* --- Dark (default: the editing canvas) -------------------------------- */
-:root,
-[data-mantine-color-scheme='dark'] {
-  --ez-bg-canvas: #0a0a0f;
-  --ez-surface-1: #131319;
-  --ez-surface-2: #1b1b24;
-  --ez-surface-3: #24242f;
-
-  --ez-line: rgba(255, 255, 255, 0.08);
-  --ez-line-strong: rgba(255, 255, 255, 0.16);
-
-  --ez-text-primary: #f4f3fa;
-  --ez-text-secondary: #9c9bae;
-  --ez-text-muted: #68677a;
-
-  --ez-accent: #7c6cf6;
-  --ez-accent-b: #9f86fa;
-  --ez-accent-dim: rgba(124, 108, 246, 0.16);
-
-  --ez-danger: #f08585;
-
-  --ez-header-bg: rgba(27, 27, 36, 0.78);
-}
-
-/* --- Light (same product, recomputed contrast) ------------------------- */
-[data-mantine-color-scheme='light'] {
-  --ez-bg-canvas: #faf9fc;
-  --ez-surface-1: #ffffff;
-  --ez-surface-2: #f5f3fa;
-  --ez-surface-3: #ece9f5;
-
-  --ez-line: rgba(23, 17, 45, 0.09);
-  --ez-line-strong: rgba(23, 17, 45, 0.16);
-
-  --ez-text-primary: #171325;
-  --ez-text-secondary: #615d74;
-  --ez-text-muted: #918da3;
-
-  --ez-accent: #6552e8;
-  --ez-accent-b: #5642d6;
-  --ez-accent-dim: rgba(101, 82, 232, 0.1);
-
-  --ez-danger: #c8443b;
-
-  --ez-header-bg: rgba(255, 255, 255, 0.72);
-}
-
-/* Convenience aliases so components read naturally. */
 :root {
   --ez-bg: var(--ez-bg-canvas);
   --ez-mono: 'JetBrains Mono', 'SFMono-Regular', ui-monospace, Menlo, Consolas,
     'Liberation Mono', monospace;
+
+  --ez-bg-canvas: #0a0a0f;
+  --ez-surface-1: #131319;
+  --ez-surface-2: #1b1b24;
+  --ez-surface-3: #24242f;
+  --ez-line: rgba(255, 255, 255, 0.08);
+  --ez-line-strong: rgba(255, 255, 255, 0.16);
+  --ez-text-primary: #f4f3fa;
+  --ez-text-secondary: #9c9bae;
+  --ez-text-muted: #68677a;
+  --ez-accent: #7c6cf6;
+  --ez-accent-b: #9f86fa;
+  --ez-accent-dim: rgba(124, 108, 246, 0.16);
+  --ez-danger: #f08585;
+  --ez-header-bg: rgba(27, 27, 36, 0.78);
 }
 
 body {

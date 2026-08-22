@@ -1,9 +1,20 @@
 import {
   IconHistory,
   IconLogout,
+  IconMoon,
+  IconSun,
   IconVideo,
 } from '@tabler/icons-react';
-import { ActionIcon, Group, Text, Tooltip, UnstyledButton } from '@mantine/core';
+import {
+  ActionIcon,
+  Group,
+  Text,
+  Tooltip,
+  UnstyledButton,
+} from '@mantine/core';
+import { useMantineColorScheme } from '@mantine/core';
+import { appThemeOptions } from '../../theme';
+import { useAppTheme } from '../../App';
 import { useVideoFlow } from '../VideoFlowContext';
 
 export type StudioTab = 'create' | 'history';
@@ -26,6 +37,8 @@ interface StudioHeaderProps {
  */
 export function StudioHeader({ activeTab, onTabChange, title, right }: StudioHeaderProps) {
   const { logout } = useVideoFlow();
+  const { theme: activeTheme, setTheme } = useAppTheme();
+  const { colorScheme } = useMantineColorScheme();
 
   const tab = (value: StudioTab, label: string, icon: React.ReactNode) => {
     const active = activeTab === value;
@@ -93,6 +106,49 @@ export function StudioHeader({ activeTab, onTabChange, title, right }: StudioHea
       </Group>
 
       <Group gap="xs">
+        <Group
+          gap={3}
+          style={{
+            background: 'var(--ez-surface-2)',
+            border: '1px solid var(--ez-line)',
+            borderRadius: 999,
+            padding: 3,
+          }}
+        >
+          {appThemeOptions
+            .filter((option) => !('hidden' in option && option.hidden))
+            .map((themeOption) => {
+              const isActive = activeTheme === themeOption.value;
+              const shortLabel = themeOption.label.slice(0, 1);
+              const isLight = themeOption.value === 'light';
+              const isDark = themeOption.value === 'dark';
+
+            return (
+              <Tooltip key={themeOption.value} label={`${themeOption.label} mode`} withArrow>
+                <ActionIcon
+                  variant={isActive ? 'filled' : 'subtle'}
+                  color={isActive ? 'brand' : 'gray'}
+                  radius="xl"
+                  size={28}
+                  onClick={() => setTheme(themeOption.value)}
+                  aria-label={`Use ${themeOption.label.toLowerCase()} theme`}
+                  aria-pressed={isActive}
+                  style={{
+                    minWidth: 32,
+                    justifyContent: 'center',
+                    paddingInline: 7,
+                    border: isActive ? '1px solid var(--ez-line-strong)' : '1px solid transparent',
+                    background: isActive ? 'var(--ez-accent-dim)' : 'transparent',
+                    color: isActive ? 'var(--ez-accent-b)' : 'var(--ez-text-secondary)',
+                    fontWeight: 700,
+                  }}
+                >
+                  {isLight ? <IconSun size={12} /> : isDark ? <IconMoon size={12} /> : <span style={{ fontSize: 10, lineHeight: 1 }}>{shortLabel}</span>}
+                </ActionIcon>
+              </Tooltip>
+            );
+          })}
+        </Group>
         {right}
         <Tooltip label="Sign out" withArrow>
           <ActionIcon
