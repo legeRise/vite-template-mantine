@@ -1201,11 +1201,10 @@ function InlinePreview({
     setPlayTime(e.currentTarget.currentTime);
   };
 
-  // Scene whose generated image overlays the video at the current playhead.
-  const overlayScene =
-    scenes.find((s) => playTime >= s.startSeconds && playTime < s.endSeconds) ??
-    scenes[scenes.length - 1] ??
-    null;
+  // Display the generated scene image only when the playhead is actually in a
+  // scene window. Empty gaps must show the raw video instead of the last scene
+  // image being stretched over the whole remaining timeline.
+  const overlayScene = scenes.find((s) => playTime >= s.startSeconds && playTime < s.endSeconds) ?? null;
   const overlaySceneElapsed = overlayScene
     ? playTime - overlayScene.startSeconds
     : 0;

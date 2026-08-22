@@ -56,14 +56,16 @@ export async function loadSceneImages(scenes: SceneModel[]): Promise<SceneImageM
   return map;
 }
 
-/** The scene whose [start, end) window contains `time` (last scene clamps). */
+/** The scene whose [start, end) window contains `time`, or null when the playhead
+ * is in an explicit gap between scenes. In those gaps the original video must be
+ * visible without any scene-image fallback. */
 export function findActiveScene(scenes: SceneModel[], time: number): SceneModel | null {
   for (const scene of scenes) {
     if (time >= scene.startSeconds && time < scene.endSeconds) {
       return scene;
     }
   }
-  return scenes.length > 0 ? scenes[scenes.length - 1] : null;
+  return null;
 }
 
 /**

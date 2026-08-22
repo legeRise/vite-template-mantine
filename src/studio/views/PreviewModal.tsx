@@ -100,11 +100,11 @@ export function PreviewModal({
     }
   }, [opened, pauseMedia, previewStart, syncMediaTo]);
 
-  // Active scene at the current playhead — drives the label + overlay.
-  const overlayScene =
-    scenes.find((s) => currentTime >= s.startSeconds && currentTime < s.endSeconds) ??
-    scenes[scenes.length - 1] ??
-    activeScene;
+  // Only render a scene overlay when the playhead is actually inside a scene.
+  // Empty gaps must show the raw video rather than falling back to the last
+  // scene image across the entire remaining space.
+  const overlayScene = scenes.find((s) => currentTime >= s.startSeconds && currentTime < s.endSeconds) ?? null;
+  const overlaySceneForLabel = overlayScene ?? activeScene;
 
   const onPlayhead = useCallback(
     (t: number) => {
@@ -166,13 +166,14 @@ export function PreviewModal({
   // Overlay opacity: the scene's frame covers the footage for exactly its
   // [start, end] window, shaped by that scene's transition (same math as the
   // inline preview and the browser export — WYSIWYG everywhere).
-  const overlayAlpha = overlayScene.imageUrl
+  const overlayAlpha = overlayScene?.imageUrl
     ? sceneTransitionOpacity(
         overlayScene.transition,
         currentTime - overlayScene.startSeconds,
         overlayScene.endSeconds - overlayScene.startSeconds
       )
     : 0;
+  const currentSceneForControls = mode === 'scene' ? previewScene : overlayScene ?? activeScene;
 
   return (
     <Modal
@@ -202,7 +203,7 @@ export function PreviewModal({
                 h="100%"
                 w="100%"
                 style={{
-                  background: overlayScene.imageUrl
+                  background: overlayScene?.imageUrl
                     ? `#000 url(${overlayScene.imageUrl}) center / cover no-repeat`
                     : '#000',
                 }}
@@ -247,7 +248,7 @@ export function PreviewModal({
           {/* Overlay — video source only. The scene image alternates with the
               real video (image fully visible, then video fully visible) instead
               of being blended 50/50. */}
-          {videoUrl && overlayScene.imageUrl && (
+          {videoUrl && overlayScene?.imageUrl && (
             <Box
               style={{
                 position: 'absolute',
@@ -286,10 +287,10 @@ export function PreviewModal({
             >
               <Group gap="xs" align="center">
                 <Badge variant="filled" color="brand" size="sm" className="ez-timecode">
-                  Scene {String(overlayScene.number).padStart(2, '0')}
+                  Scene {String(overlaySceneForLabel.number).padStart(2, '0')}
                 </Badge>
                 <Text fw={600} size="sm" style={{ lineClamp: 1 }}>
-                  {overlayScene.title}
+                  {overlaySceneForLabel.title}
                 </Text>
               </Group>
             </Box>
@@ -310,7 +311,7 @@ export function PreviewModal({
                 zIndex: 2,
               }}
             >
-              {isAudio ? 'Audio slideshow' : overlayAlpha > 0.5 ? 'Image' : 'Video'}
+              {isAudio ? 'Audio slideshow' : overlayScene && overlayAlpha > 0.5 ? 'Image' : 'Video'}
             </Box>
           )}
         </Box>
@@ -320,7 +321,7 @@ export function PreviewModal({
           <ActionIcon
             variant="light"
             size="lg"
-            onClick={() => goTo(scenes.indexOf(mode === 'scene' ? previewScene : overlayScene) - 1)}
+            onClick={() => goTo(scenes.indexOf(currentSceneForControls) - 1)}
             aria-label="Previous scene"
           >
             <IconArrowLeft size={20} />
@@ -338,7 +339,7 @@ export function PreviewModal({
             <Button
               variant="filled"
               leftSection={<IconPlayerPlay size={16} />}
-              onClick={() => goTo(scenes.indexOf(overlayScene) + 1)}
+              onClick={() => goTo(scenes.indexOf(currentSceneForControls) + 1)}
             >
               Next scene
             </Button>
@@ -347,7 +348,7 @@ export function PreviewModal({
           <ActionIcon
             variant="light"
             size="lg"
-            onClick={() => goTo(scenes.indexOf(mode === 'scene' ? previewScene : overlayScene) + 1)}
+            onClick={() => goTo(scenes.indexOf(currentSceneForControls) + 1)}
             aria-label="Next scene"
           >
             <IconArrowRight size={20} />
@@ -372,7 +373,7 @@ export function PreviewModal({
               {formatSeconds(currentTime)}
             </Text>
             <Text size="sm" fw={600}>
-              Scene {String(overlayScene.number).padStart(2, '0')} · {overlayScene.title}
+              Scene {String(overlaySceneForLabel.number).padStart(2, '0')} · {overlaySceneForLabel.title}
             </Text>
             <Text size="sm" c="dimmed" className="ez-timecode">
               {formatSeconds(previewEnd)}
@@ -380,7 +381,7 @@ export function PreviewModal({
           </Group>
         </Stack>
 
-        {videoUrl && overlayScene.imageUrl && (
+        {videoUrl && overlayScene?.imageUrl && (
           <Text c="dimmed" size="xs" ta="center">
             {overlayAlpha > 0.5 ? 'Showing generated image…' : 'Showing original video…'}
           </Text>

@@ -2,6 +2,14 @@
 
 This document captures the actual product and engineering direction for fixing the editor timeline without turning it into a fragile one-off patch.
 
+## Completed milestones
+
+These items are already implemented and should be treated as the baseline contract going forward:
+
+- lock/unlock handling is in place for scenes and editing is protected by default
+- selection and playback highlight are separated so scene choice and media position no longer fight each other
+- empty gaps between scenes now keep the raw video visible instead of falling back to the last scene image in export/preview
+
 ## The real issue
 
 The timeline is not a single broken widget. It is a coordination problem between several overlapping state sources:
