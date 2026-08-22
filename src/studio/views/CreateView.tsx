@@ -4,7 +4,6 @@ import {
   IconCheck,
   IconClock,
   IconFileMusic,
-  IconLoader2,
   IconMail,
   IconMovie,
   IconSparkles,
@@ -20,6 +19,7 @@ import {
   Divider,
   FileInput,
   Group,
+  Loader,
   Paper,
   PasswordInput,
   Progress,
@@ -362,7 +362,7 @@ export function CreateView({ onComplete }: CreateViewProps) {
         // a little extra depth on the create screen.
       }}
     >
-      {/* Decorative background glows */}
+      {/* Decorative background glows — subtle brand ambient, the one brand moment. */}
       <Box
         aria-hidden
         style={{
@@ -374,7 +374,7 @@ export function CreateView({ onComplete }: CreateViewProps) {
           height: 420,
           borderRadius: '50%',
           background:
-            'radial-gradient(closest-side, rgba(124,58,237,0.16), rgba(124,58,237,0.05) 60%, transparent 100%)',
+            'radial-gradient(closest-side, rgba(124,108,246,0.14), rgba(124,108,246,0.04) 60%, transparent 100%)',
           pointerEvents: 'none',
           zIndex: 0,
         }}
@@ -389,7 +389,7 @@ export function CreateView({ onComplete }: CreateViewProps) {
           height: 420,
           borderRadius: '50%',
           background:
-            'radial-gradient(closest-side, rgba(99,102,241,0.10), transparent 70%)',
+            'radial-gradient(closest-side, rgba(124,108,246,0.08), transparent 70%)',
           pointerEvents: 'none',
           zIndex: 0,
         }}
@@ -404,7 +404,7 @@ export function CreateView({ onComplete }: CreateViewProps) {
           height: 460,
           borderRadius: '50%',
           background:
-            'radial-gradient(closest-side, rgba(217,70,239,0.10), transparent 70%)',
+            'radial-gradient(closest-side, rgba(159,134,250,0.08), transparent 70%)',
           pointerEvents: 'none',
           zIndex: 0,
         }}
@@ -413,7 +413,7 @@ export function CreateView({ onComplete }: CreateViewProps) {
       <Stack gap="lg" maw={1200} mx="auto" style={{ position: 'relative', zIndex: 1 }}>
         {/* Compact hero */}
         <Stack align="center" gap={4} ta="center">
-          <Title order={1} ta="center" style={{ fontSize: rem(34), letterSpacing: '-0.03em' }}>
+          <Title order={1} ta="center" style={{ fontSize: rem(29), letterSpacing: '-0.03em' }}>
             Create a visual story
           </Title>
           <Text c="dimmed" size="md" maw={520} ta="center">
@@ -444,9 +444,9 @@ export function CreateView({ onComplete }: CreateViewProps) {
                       height: 34,
                       borderRadius: 'var(--mantine-radius-md)',
                       background: isRunning
-                        ? 'var(--mantine-color-violet-0)'
+                        ? 'var(--ez-accent-dim)'
                         : 'var(--mantine-color-gray-1)',
-                      color: 'var(--mantine-color-violet-6)',
+                      color: 'var(--ez-accent)',
                       display: 'grid',
                       placeItems: 'center',
                     }}
@@ -540,9 +540,9 @@ export function CreateView({ onComplete }: CreateViewProps) {
                     size="md"
                     fullWidth
                     radius="md"
-                    disabled
+                    loading
                     variant="filled"
-                    leftSection={<IconLoader2 size={18} className="spin" />}
+                    loaderProps={{ size: 'sm' }}
                   >
                     {activeStageLabel}…
                   </Button>
@@ -553,9 +553,8 @@ export function CreateView({ onComplete }: CreateViewProps) {
                     radius="md"
                     loading={submitting}
                     disabled={!file || !language || submitting}
-                    leftSection={<IconMovie size={20} />}
-                    onClick={handleAnalyze}
-                  >
+                    leftSection={submitting ? undefined : <IconMovie size={20} />}
+                    onClick={handleAnalyze}                 >
                     Analyze Video
                   </Button>
                 )}
@@ -581,7 +580,7 @@ export function CreateView({ onComplete }: CreateViewProps) {
                 shadow="sm"
                 style={{
                   borderStyle: 'dashed',
-                  background: 'var(--mantine-color-gray-0)',
+                  background: 'var(--ez-surface-1)',
                   minHeight: 420,
                 }}
               >
@@ -592,8 +591,8 @@ export function CreateView({ onComplete }: CreateViewProps) {
                         width: 56,
                         height: 56,
                         borderRadius: '50%',
-                        background: 'var(--mantine-color-violet-0)',
-                        color: 'var(--mantine-color-violet-6)',
+                        background: 'var(--ez-accent-dim)',
+                        color: 'var(--ez-accent)',
                         display: 'grid',
                         placeItems: 'center',
                       }}
@@ -644,17 +643,17 @@ function ProcessingPanel({
         withBorder
         style={{
           background: isFailed
-            ? 'linear-gradient(135deg, var(--mantine-color-red-0), var(--mantine-color-gray-0))'
-            : 'linear-gradient(135deg, var(--mantine-color-violet-0), var(--mantine-color-indigo-0))',
+            ? 'linear-gradient(135deg, rgba(240,133,133,0.12), transparent)'
+            : 'linear-gradient(135deg, var(--ez-accent-dim), transparent)',
         }}
       >
         <Stack gap="md">
           <Group gap={8}>
-            <Badge radius="xl" variant={isFailed ? 'light' : 'filled'} color={isFailed ? 'red' : 'violet'}>
+            <Badge radius="xl" variant={isFailed ? 'light' : 'filled'} color={isFailed ? 'red' : 'brand'}>
               {isFailed ? 'Failed' : 'Processing'}
             </Badge>
             {!isFailed && (
-              <Badge radius="xl" variant="light" color="violet" leftSection={<IconSparkles size={12} />}>
+              <Badge radius="xl" variant="light" color="brand" leftSection={<IconSparkles size={12} />}>
                 AI analysis
               </Badge>
             )}
@@ -677,11 +676,11 @@ function ProcessingPanel({
                 thickness={12}
                 roundCaps
                 sections={[
-                  { value: isFailed ? 100 : Math.max(progress, 4), color: isFailed ? 'red' : 'violet' },
+                  { value: isFailed ? 100 : Math.max(progress, 4), color: isFailed ? 'red' : 'brand' },
                 ]}
                 label={
                   <Stack gap={0} align="center" justify="center">
-                    <Text fw={700} size={rem(22)} ta="center">
+                    <Text fw={700} size={rem(22)} ta="center" className="ez-timecode">
                       {progress}%
                     </Text>
                     <Text c="dimmed" size="xs" ta="center">
@@ -700,7 +699,7 @@ function ProcessingPanel({
               radius="xl"
               striped={!isFailed}
               animated={!isFailed}
-              color={isFailed ? 'red' : 'violet'}
+              color={isFailed ? 'red' : 'brand'}
               transitionDuration={300}
             />
           </Box>
@@ -746,7 +745,7 @@ function StageRow({ stage }: { stage: Stage }) {
     return (
       <RowShell active>
         <Center style={{ width: 22 }}>
-          <IconLoader2 size={18} className="spin" color="var(--mantine-color-violet-6)" />
+          <Loader size={18} color="var(--ez-accent)" />
         </Center>
         <Text size="md" fw={600}>
           {stage.label}
@@ -776,11 +775,11 @@ function RowShell({ children, active }: { children: React.ReactNode; active?: bo
       px="md"
       style={{
         borderRadius: 'var(--mantine-radius-md)',
-        background: active ? 'var(--mantine-color-violet-0)' : 'var(--mantine-color-gray-0)',
+        background: active ? 'var(--ez-accent-dim)' : 'var(--mantine-color-gray-0)',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>{children}</div>
-      {active && <Progress value={78} size="xs" radius="xl" color="violet" striped animated />}
+      {active && <Progress value={78} size="xs" radius="xl" color="brand" striped animated />}
     </Stack>
   );
 }
@@ -814,8 +813,8 @@ function LoginCard({ onLogin }: { onLogin: (email: string, password: string) => 
               width: 56,
               height: 56,
               borderRadius: '50%',
-              background: 'var(--mantine-color-violet-0)',
-              color: 'var(--mantine-color-violet-6)',
+              background: 'var(--ez-accent-dim)',
+              color: 'var(--ez-accent)',
             }}
           >
             <IconMail size={26} />
@@ -847,7 +846,7 @@ function LoginCard({ onLogin }: { onLogin: (email: string, password: string) => 
           value={password}
           onChange={(e) => setPassword(e.currentTarget.value)}
         />
-        <Button type="submit" fullWidth loading={loading}>
+        <Button type="submit" loading={loading} >
           Sign in
         </Button>
 

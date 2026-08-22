@@ -14,6 +14,7 @@ export function Studio() {
     isAuthenticated,
     scenes,
     scenesLoading,
+    trackerId,
     videoLabel,
     videoUrl,
     audioUrl,
@@ -125,6 +126,7 @@ export function Studio() {
                 <ExportView
                   onBackToEditor={goEditor}
                   onDone={goAnalysis}
+                  trackerId={trackerId}
                   videoUrl={videoUrl}
                   audioUrl={audioUrl}
                   scenes={scenes}

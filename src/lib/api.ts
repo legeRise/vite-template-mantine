@@ -93,7 +93,6 @@ export interface SceneDto {
   pause_after: number;
   start: number;
   end: number;
-  image_prompt: string;
   image_url: string | null;
   image_generated_at: string | null;
   edited: boolean;
@@ -118,11 +117,12 @@ export interface SceneImageResponse {
 }
 
 // Editable fields for PATCH / PUT on a scene.
+// NOTE: image_prompt is deliberately absent — internal prompts never leave the
+// server. Users shape images via the "Change with AI" instruction flow.
 export interface SceneEditPayload {
   scene_title?: string;
   description?: string;
   narration?: string;
-  image_prompt?: string;
   pause_after?: number;
   start?: number;
   end?: number;
@@ -392,6 +392,121 @@ export function streamJobStatus(
   return () => controller.abort();
 }
 
+// ---------------------------------------------------------------------------
+// Server-side export (ffmpeg on the backend)
+// ---------------------------------------------------------------------------
+
+export interface ExportStatus {
+  tracker_id: string;
+  export_id: string;
+  status: 'queued' | 'in_progress' | 'completed' | 'failed' | string;
+  status_message?: string;
+  progress?: number;
+  video_url?: string | null;
+}
+
+/** POST /video-jobs/<id>/export — kick off (or return status of) a server export. */
+export async function triggerProjectExport(trackerId: string): Promise<ExportStatus> {
+  return request<ExportStatus>(`/api/text2video/video-jobs/${trackerId}/export/`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * Stream a project export's progress via SSE (fetch + ReadableStream so we can
+ * attach the Authorization header, matching streamJobStatus). Returns an abort
+ * function to stop the stream.
+ */
+export function streamProjectExport(
+  trackerId: string,
+  callbacks: {
+    onProgress: (status: ExportStatus) => void;
+    onDone: (status: ExportStatus) => void;
+    onError: (err: Error) => void;
+  }
+): () => void {
+  const controller = new AbortController();
+  const { onProgress, onDone, onError } = callbacks;
+  const url = `${API_BASE_URL}/api/text2video/video-jobs/${trackerId}/export/stream/`;
+
+  (async () => {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${getAccessToken() ?? ''}`,
+          Accept: 'text/event-stream',
+        },
+        signal: controller.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        throw new Error(`Failed to open export stream (${res.status})`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const parseBlock = (block: string): ExportStatus | null => {
+        const dataLine = block.split('\n').find((line) => line.startsWith('data:'));
+        if (!dataLine) return null; // heartbeat / comment lines are ignored
+        const raw = dataLine.slice(5).trim();
+        if (!raw) return null;
+        return JSON.parse(raw) as ExportStatus;
+      };
+
+      const processChunk = (chunk: string): [boolean, ExportStatus | null] => {
+        buffer += chunk;
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop() ?? '';
+        let last: ExportStatus | null = null;
+        for (const block of blocks) {
+          const st = parseBlock(block);
+          if (!st) continue;
+          last = st;
+          onProgress(st);
+          if (
+            st.status === 'completed' ||
+            st.status === 'failed' ||
+            (st.progress ?? 0) >= 100
+          ) {
+            onDone(st);
+            controller.abort();
+            return [true, st];
+          }
+        }
+        return [false, last];
+      };
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const [isTerminal] = processChunk(decoder.decode(value, { stream: true }));
+        if (isTerminal) return;
+      }
+
+      const [flushTerminal, flushLast] = processChunk(buffer);
+      if (flushTerminal) return;
+      if (flushLast) {
+        onProgress(flushLast);
+        if (
+          flushLast.status === 'completed' ||
+          flushLast.status === 'failed' ||
+          (flushLast.progress ?? 0) >= 100
+        ) {
+          onDone(flushLast);
+        }
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return; // intentional abort, not an error
+      onError(err instanceof Error ? err : new Error(String(err)));
+    }
+  })();
+
+  return () => controller.abort();
+}
+
 /** A single past creation from the user's history. */
 export interface CreationInfo {
   id: number;
@@ -466,7 +581,6 @@ export async function deleteScene(
 export interface BulkScenePatch {
   scene_id: number;
   scene_title?: string;
-  image_prompt?: string;
   start?: number;
   end?: number;
 }
@@ -496,32 +610,27 @@ export async function createScene(
   });
 }
 
-/** Step 5 — regenerate one scene's image (optionally with a prompt override). */
-export async function regenerateSceneImage(
-  sceneId: number,
-  promptOverride?: string
-): Promise<SceneDto> {
+/** Step 5 — regenerate one scene's image from its stored internal prompt. */
+export async function regenerateSceneImage(sceneId: number): Promise<SceneDto> {
   return request<SceneDto>(`/api/text2video/scenes/${sceneId}/regenerate-image/`, {
     method: 'POST',
-    body: JSON.stringify(promptOverride ? { prompt_override: promptOverride } : {}),
+    body: JSON.stringify({}),
   });
 }
 
 /**
- * "Change with AI" — ask the LLM to revise a scene's prompt from a short user
- * instruction, then regenerate the image. Returns the scene + the AI's reason.
+ * "Change with AI" — the user describes what to change in plain language; the
+ * backend revises the scene's internal prompt and regenerates the image. The
+ * prompt itself never comes back to the client.
  */
 export async function changeSceneWithAI(
   sceneId: number,
   instruction: string
-): Promise<SceneDto & { reason?: string }> {
-  return request<SceneDto & { reason?: string }>(
-    `/api/text2video/scenes/${sceneId}/change-with-ai/`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ instruction }),
-    }
-  );
+): Promise<SceneDto> {
+  return request<SceneDto>(`/api/text2video/scenes/${sceneId}/change-with-ai/`, {
+    method: 'POST',
+    body: JSON.stringify({ instruction }),
+  });
 }
 
 /** Step 6 — fetch a scene's image (convenience). */
@@ -578,67 +687,51 @@ export function formatDelta(seconds: number): string {
 }
 
 /**
- * Overlay opacity for the generated scene image over the real video at a given
- * playback position within a scene.
+ * Opacity of a scene's image at a playback position.
  *
- * The image appears exactly ONCE at the start of each scene — it fades in over
- * the real "person" footage, holds briefly, then fades out so the real person
- * is visible for the rest of the scene. It never flip-flops back to the image,
- * which reads as one clean "title card" moment per scene rather than the old
- * rapid image<->video alternating cycle.
+ * EXACT-WINDOW SEMANTICS: the generated frame is displayed for precisely the
+ * scene's [startSeconds, endSeconds] window — nothing auto-shortens or extends
+ * it. Outside the window the raw footage plays untouched. The transition only
+ * shapes HOW the frame appears inside its own window:
+ *   - cut       -> hard on/off at both edges
+ *   - fade      -> 0.6s blend in from / out to the footage
+ *   - crossfade -> 1.2s softer blend at both edges
+ *   - kenburns  -> fully opaque the whole window (motion comes from the zoom)
  *
  * Returns an opacity 0..1.
- */
-export function sceneOverlayAlpha(elapsed: number, sceneDuration = 8): number {
-  // Show the image for the first PORTION of the scene, then reveal the person.
-  // Longer scenes show it a fraction of the time too, capped so very short
-  // scenes still get one visible image moment.
-  const SHOW_FRACTION = 0.35; // first 35% of the scene shows the image
-  const MIN_IMAGE_TIME = 2.2; // seconds the image is at least held
-  const TOTAL = Math.max(sceneDuration * SHOW_FRACTION, MIN_IMAGE_TIME);
-  const FADE = 0.5; // seconds to cross-fade in/out
-
-  if (elapsed >= TOTAL) return 0; // person visible for the rest of the scene
-  const p1 = FADE; // image fades in: 0 -> 1
-  const p2 = Math.max(TOTAL - FADE, FADE); // image begins fading out
-  if (elapsed < p1) return elapsed / FADE; // fade in (person -> image)
-  if (elapsed < p2) return 1; // image only (held)
-  return Math.max(0, 1 - (elapsed - p2) / FADE); // fade out (image -> person)
-}
-
-/**
- * Opacity of the scene image at a playback position given the scene's chosen
- * TRANSITION. Falls back to the classic single-fade behaviour for 'cut'.
- *
- * Keeps the same default "image title card" feel but lets each scene pick a
- * different presentation:
- *   - cut       -> default single fade-in/hold/fade-out (existing behaviour)
- *   - fade      -> the image fades in, and at the END also fades out to black
- *                  (soft dip) before the next scene.
- *   - crossfade -> the image cross-fades with the video (image opacity ramps
- *                  up then back down once per scene).
- *   - kenburns  -> the image is shown full during its moment, but with a slow
- *                  zoom (see sceneTransitionTransform); opacity stays high.
  */
 export function sceneTransitionOpacity(
   transition: SceneTransition,
   elapsed: number,
   sceneDuration = 8
 ): number {
-  if (transition === 'fade') {
-    const FADE_IN = 0.6;
-    const FADE_OUT = 0.6;
-    const hold = Math.max(0, sceneDuration - FADE_IN - FADE_OUT);
-    if (elapsed < FADE_IN) return elapsed / FADE_IN;
-    if (elapsed < FADE_IN + hold) return 1;
-    return Math.max(0, 1 - (elapsed - (FADE_IN + hold)) / FADE_OUT);
-  }
-  if (transition === 'kenburns') {
-    // Sky image for its whole on-screen window, with Ken Burns motion.
+  if (transition === 'cut' || transition === 'kenburns') {
     return 1;
   }
-  // 'cut' and 'crossfade' reuse the classic single-fade title-card opacity.
-  return sceneOverlayAlpha(elapsed, sceneDuration);
+  const dur = Math.max(sceneDuration, 0.001);
+  const RAMP = transition === 'crossfade' ? 1.2 : 0.6;
+  // Very short scenes still get a symmetric blend that never exceeds half.
+  const ramp = Math.min(RAMP, dur / 2);
+  if (elapsed < ramp) {
+    return Math.max(0, elapsed / ramp);
+  }
+  const remaining = dur - elapsed;
+  if (remaining < ramp) {
+    return Math.max(0, remaining / ramp);
+  }
+  return 1;
+}
+
+/**
+ * Numeric Ken Burns zoom factor at a playback position — a slow push-in from
+ * 1.0 to ~1.18 across the scene's on-screen window. Shared by the CSS preview
+ * (via sceneTransitionTransform) and the canvas-based browser export, so both
+ * stay pixel-identical.
+ */
+export function sceneTransitionZoom(elapsed: number, sceneDuration = 8): number {
+  const TOTAL = Math.max(sceneDuration, 1);
+  const t = Math.min(1, Math.max(0, elapsed / TOTAL)); // 0..1 through the scene
+  return 1 + t * 0.18;
 }
 
 /**
@@ -646,9 +739,5 @@ export function sceneTransitionOpacity(
  * zoom (optionally with a slight pan) so the still image feels alive.
  */
 export function sceneTransitionTransform(elapsed: number, sceneDuration = 8): string {
-  const TOTAL = Math.max(sceneDuration, 1);
-  const t = Math.min(1, Math.max(0, elapsed / TOTAL)); // 0..1 through the scene
-  // Scale from 1.0 -> ~1.18 (gentle zoom-in) over the scene's on-screen window.
-  const scale = 1 + t * 0.18;
-  return `scale(${scale.toFixed(3)})`;
+  return `scale(${sceneTransitionZoom(elapsed, sceneDuration).toFixed(3)})`;
 }

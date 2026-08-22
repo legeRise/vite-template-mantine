@@ -43,13 +43,24 @@ export interface SceneModel {
   title: string;
   narration: string;
   description: string;
-  prompt: string;
   imageUrl: string | null;
   pauseAfter: number;
   edited: boolean;
   regenerateCount: number;
   order: number;
   transition: SceneTransition;
+}
+
+/**
+ * Version a media URL with the scene's regenerate count. The backend OVERWRITES
+ * the same file (`image_1.jpg`) on every regeneration, so without this the
+ * browser serves the stale cached image and the new frame never appears —
+ * which made Regenerate / Change-with-AI look broken even though they worked.
+ */
+function withCacheBust(url: string | null, version: number): string | null {
+  if (!url) return null;
+  if (!version || version <= 0) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}v=${version}`;
 }
 
 function toSceneModel(dto: SceneDto): SceneModel {
@@ -63,13 +74,12 @@ function toSceneModel(dto: SceneDto): SceneModel {
     title: dto.scene_title,
     narration: dto.narration,
     description: dto.description,
-    prompt: dto.image_prompt,
-    imageUrl: dto.image_url,
+    imageUrl: withCacheBust(resolveMediaUrl(dto.image_url), dto.regenerate_count),
     pauseAfter: dto.pause_after,
     edited: dto.edited,
     regenerateCount: dto.regenerate_count,
     order: dto.order,
-    transition: dto.transition ?? 'cut',
+    transition: dto.transition ?? 'kenburns',
   };
 }
 
@@ -149,16 +159,25 @@ interface VideoFlowValue {
   updateScene: (sceneId: number, patch: SceneEditPayload) => SceneModel;
   addScene: (patch?: SceneEditPayload) => Promise<SceneModel>;
   deleteScene: (sceneId: number) => Promise<SceneModel[]>;
-  /** Move the boundary between a scene and the next (fixed total duration). */
-  moveSceneBoundary: (sceneId: number, newEnd: number) => SceneModel[];
-  /** Move the boundary between the previous scene and this one (fixed total duration).
-   *  This drags the scene's LEFT edge. */
-  moveSceneStart: (sceneId: number, newStart: number) => SceneModel[];
-  /** Resize the last scene's END directly (so an overflowing tail can be dragged
-   *  back within the video). */
-  resizeSceneEnd: (sceneId: number, newEnd: number) => void;
-  regenerateImage: (sceneId: number, promptOverride?: string) => Promise<SceneModel>;
-  /** "Change with AI" — revise a scene's prompt from a short instruction, then regenerate. */
+  /** Resize one scene's START or END edge. Scenes are independent windows on a
+   *  fixed track: neighbours never move, gaps are allowed, overlaps are not.
+   *  `mediaDuration` (when known) caps the last scene's right edge. */
+  resizeScene: (
+    sceneId: number,
+    side: 'start' | 'end',
+    newTime: number,
+    mediaDuration?: number | null
+  ) => SceneModel[];
+  /** Move a WHOLE scene (both edges, duration preserved) so its start lands at
+   *  `newStart`. Slides within the gap between its neighbours — never overlaps. */
+  moveScene: (
+    sceneId: number,
+    newStart: number,
+    mediaDuration?: number | null
+  ) => SceneModel[];
+  regenerateImage: (sceneId: number) => Promise<SceneModel>;
+  /** "Change with AI" — the user describes the change in plain language; the
+   *  backend revises the internal prompt (never exposed) and regenerates. */
   changeWithAI: (sceneId: number, instruction: string) => Promise<SceneModel>;
   openCreation: (trackerId: string, label?: string) => Promise<SceneModel[]>;
   // Undo / Redo
@@ -170,6 +189,9 @@ interface VideoFlowValue {
    *  snapshot restore (and avoid re-applying a stale autosave). */
   historyToken: number;
 }
+
+/** Minimum allowed scene length in seconds — prevents accidental zero-length clips. */
+const MIN_SCENE_DURATION = 0.3;
 
 const VideoFlowContext = createContext<VideoFlowValue | null>(null);
 
@@ -403,7 +425,6 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
         return {
           ...s,
           title: patch.scene_title ?? s.title,
-          prompt: patch.image_prompt ?? s.prompt,
           description: patch.description ?? s.description,
           narration: patch.narration ?? s.narration,
           pauseAfter: patch.pause_after ?? s.pauseAfter,
@@ -448,25 +469,27 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
   );
 
   /**
-   * Move a scene's end time and ripple: every scene that follows shifts by the
-   * same delta so there are no gaps or overlaps. Each changed scene is saved via
-   * the existing per-scene PATCH endpoint, and the local list is updated
-   * optimistically for a snappy drag feel.
+   * Resize one scene's START or END edge to `newTime` — the single building
+   * block of the gap-friendly timeline. Scenes are independent overlay windows
+   * on a fixed track: resizing NEVER moves a neighbour, so the user can create
+   * deliberate empty gaps (raw footage shows through, audio continues) but can
+   * never create overlaps or zero-length scenes.
+   *
+   * Clamping:
+   *  - left edge  ∈ [prev neighbour's end (or 0), own end − MIN_SCENE_DURATION]
+   *  - right edge ∈ [own start + MIN_SCENE_DURATION, next neighbour's start
+   *                 (or mediaDuration for the last scene)]
+   *
+   * Applied locally only (persisted to localStorage instantly; synced to the
+   * backend on leave/hide/pause via the bulk flush) so drags feel instant.
    */
-  /**
-   * Move the boundary between scene `sceneId` and the scene that follows it to
-   * `newEnd`. Scene N's end and scene N+1's start both move to the new cut
-   * point; the overall video duration stays fixed (time-bound timeline). Saved
-   * via the existing per-scene PATCH endpoint, with an optimistic local update
-   * for a snappy drag feel.
-   */
-  /**
-   * Move the boundary between scene `sceneId` and the one after it to `newEnd`.
-   * Applied locally (persisted to localStorage instantly; synced to the backend
-   * on leave/hide/pause via the bulk flush), so the backend is NOT hit per drag.
-   */
-  const moveSceneBoundary = useCallback(
-    (sceneId: number, newEnd: number) => {
+  const resizeScene = useCallback(
+    (
+      sceneId: number,
+      side: 'start' | 'end',
+      newTime: number,
+      mediaDuration?: number | null
+    ): SceneModel[] => {
       if (!trackerId) {
         throw new Error('No active job');
       }
@@ -474,66 +497,34 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
         (a, b) => a.order - b.order || a.startSeconds - b.startSeconds
       );
       const idx = ordered.findIndex((s) => s.id === sceneId);
-      if (idx === -1 || idx >= ordered.length - 1) {
-        // Scene not found or has no right-hand neighbour (last scene) — no-op.
-        return scenesRef.current;
-      }
-      const target = ordered[idx];
-      const nextTarget = ordered[idx + 1];
-      const cleaned = Math.round(newEnd * 100) / 100;
-      const minBound = target.startSeconds + 0.3;
-      const maxBound = nextTarget.endSeconds - 0.3;
-      const bounded = Math.min(Math.max(cleaned, minBound), maxBound);
-      if (Math.abs(bounded - target.endSeconds) < 0.05) {
-        return scenesRef.current;
-      }
-
-      recordHistory();
-
-      setScenes((prev) =>
-        prev.map((s) => {
-          if (s.id === target.id) return { ...s, endSeconds: bounded, edited: true };
-          if (s.id === nextTarget.id) return { ...s, startSeconds: bounded, edited: true };
-          return s;
-        })
-      );
-      return scenesRef.current;
-    },
-    [trackerId, recordHistory]
-  );
-
-  // Move the boundary to the LEFT of a scene — scene N's start and scene N-1's
-  // end both slide to `newStart`. Total video length stays fixed.
-  const moveSceneStart = useCallback(
-    (sceneId: number, newStart: number) => {
-      if (!trackerId) {
-        throw new Error('No active job');
-      }
-      const ordered = [...scenesRef.current].sort(
-        (a, b) => a.order - b.order || a.startSeconds - b.startSeconds
-      );
-      const idx = ordered.findIndex((s) => s.id === sceneId);
-      if (idx <= 0 || idx === -1) {
-        // No left-hand neighbour (first scene) or not found — no-op.
-        return scenesRef.current;
-      }
+      if (idx === -1) return scenesRef.current;
       const target = ordered[idx];
       const prevTarget = ordered[idx - 1];
-      const cleaned = Math.round(newStart * 100) / 100;
-      const minBound = prevTarget.startSeconds + 0.3;
-      const maxBound = target.endSeconds - 0.3;
-      const bounded = Math.min(Math.max(cleaned, minBound), maxBound);
-      if (Math.abs(bounded - target.startSeconds) < 0.05) {
-        return scenesRef.current;
+      const nextTarget = ordered[idx + 1];
+
+      const cleaned = Math.round(newTime * 100) / 100;
+      let bounded: number;
+      if (side === 'start') {
+        const min = prevTarget ? prevTarget.endSeconds : 0;
+        const max = target.endSeconds - MIN_SCENE_DURATION;
+        bounded = Math.min(Math.max(cleaned, min), max);
+        if (Math.abs(bounded - target.startSeconds) < 0.05) return scenesRef.current;
+      } else {
+        const min = target.startSeconds + MIN_SCENE_DURATION;
+        const fallbackMax =
+          mediaDuration && mediaDuration > 0 ? mediaDuration : target.endSeconds;
+        const max = nextTarget ? nextTarget.startSeconds : fallbackMax;
+        bounded = Math.min(Math.max(cleaned, min), max);
+        if (Math.abs(bounded - target.endSeconds) < 0.05) return scenesRef.current;
       }
 
       recordHistory();
-
       setScenes((prev) =>
         prev.map((s) => {
-          if (s.id === target.id) return { ...s, startSeconds: bounded, edited: true };
-          if (s.id === prevTarget.id) return { ...s, endSeconds: bounded, edited: true };
-          return s;
+          if (s.id !== target.id) return s;
+          return side === 'start'
+            ? { ...s, startSeconds: bounded, edited: true }
+            : { ...s, endSeconds: bounded, edited: true };
         })
       );
       return scenesRef.current;
@@ -542,30 +533,55 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
   );
 
   /**
-   * Resize the LAST scene's END in place (shrink/expand the tail). Unlike
-   * `moveSceneBoundary` (which needs a right-hand neighbour), this is used so
-   * an overflowing scene that extends past the video length can be dragged back
-   * in from its right edge. `newEnd` is clamped to stay within [start+0.3, end].
+   * Move a WHOLE scene (both edges, duration preserved) so its start lands at
+   * `newStart`. The scene slides freely inside the window between its
+   * neighbours — gaps open up on either side, overlaps are impossible.
    */
-  const resizeSceneEnd = useCallback(
-    (sceneId: number, newEnd: number) => {
+  const moveScene = useCallback(
+    (
+      sceneId: number,
+      newStart: number,
+      mediaDuration?: number | null
+    ): SceneModel[] => {
       if (!trackerId) {
         throw new Error('No active job');
       }
-      const scene = scenesRef.current.find((s) => s.id === sceneId);
-      if (!scene) return;
-      const cleaned = Math.round(newEnd * 100) / 100;
-      const minBound = scene.startSeconds + 0.3;
-      // Only allow shrinking/extending the tail up to its current end (so a
-      // drag can pull it back within the footage, but never silently grow it).
-      const maxBound = scene.endSeconds;
-      const bounded = Math.min(Math.max(cleaned, minBound), maxBound);
-      if (Math.abs(bounded - scene.endSeconds) < 0.05) return;
+      const ordered = [...scenesRef.current].sort(
+        (a, b) => a.order - b.order || a.startSeconds - b.startSeconds
+      );
+      const idx = ordered.findIndex((s) => s.id === sceneId);
+      if (idx === -1) return scenesRef.current;
+      const target = ordered[idx];
+      const prevTarget = ordered[idx - 1];
+      const nextTarget = ordered[idx + 1];
+
+      const duration = target.endSeconds - target.startSeconds;
+      const cleaned = Math.round(newStart * 100) / 100;
+      const min = prevTarget ? prevTarget.endSeconds : 0;
+      const hardMax =
+        nextTarget
+          ? nextTarget.startSeconds
+          : mediaDuration && mediaDuration > 0
+            ? mediaDuration
+            : Math.max(target.endSeconds, cleaned + duration);
+      const max = Math.max(min, hardMax - duration);
+      const bounded = Math.min(Math.max(cleaned, min), max);
+      if (
+        Math.abs(bounded - target.startSeconds) < 0.05 &&
+        Math.abs(bounded + duration - target.endSeconds) < 0.05
+      ) {
+        return scenesRef.current;
+      }
 
       recordHistory();
       setScenes((prev) =>
-        prev.map((s) => (s.id === sceneId ? { ...s, endSeconds: bounded, edited: true } : s))
+        prev.map((s) =>
+          s.id === target.id
+            ? { ...s, startSeconds: bounded, endSeconds: bounded + duration, edited: true }
+            : s
+        )
       );
+      return scenesRef.current;
     },
     [trackerId, recordHistory]
   );
@@ -595,9 +611,9 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const regenerateImage = useCallback(async (sceneId: number, promptOverride?: string) => {
+  const regenerateImage = useCallback(async (sceneId: number) => {
     recordHistory();
-    const updated = await regenerateSceneImage(sceneId, promptOverride);
+    const updated = await regenerateSceneImage(sceneId);
     const model = toSceneModel(updated);
     setScenes((prev) => prev.map((s) => (s.id === sceneId ? model : s)));
     return model;
@@ -644,7 +660,6 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
           scenes.map((s) => ({
             id: s.id,
             scene_title: s.title,
-            image_prompt: s.prompt,
             start: s.startSeconds,
             end: s.endSeconds,
             edited: s.edited,
@@ -666,7 +681,6 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
     const payload = sc.map((s) => ({
       scene_id: s.id,
       scene_title: s.title,
-      image_prompt: s.prompt,
       start: s.startSeconds,
       end: s.endSeconds,
     }));
@@ -721,9 +735,8 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       updateScene,
       addScene,
       deleteScene,
-      moveSceneBoundary,
-      moveSceneStart,
-      resizeSceneEnd,
+      resizeScene,
+      moveScene,
       regenerateImage,
       changeWithAI,
       openCreation,
@@ -754,9 +767,8 @@ export function VideoFlowProvider({ children }: { children: ReactNode }) {
       updateScene,
       addScene,
       deleteScene,
-      moveSceneBoundary,
-      moveSceneStart,
-      resizeSceneEnd,
+      resizeScene,
+      moveScene,
       regenerateImage,
       changeWithAI,
       openCreation,

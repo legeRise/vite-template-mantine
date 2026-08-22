@@ -1,14 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import { useMediaQuery } from '@mantine/hooks';
 import {
   IconAlertCircle,
   IconCheck,
   IconDownload,
   IconEye,
   IconFileText,
-  IconLock,
-  IconLockOpen,
-  IconMaximize,
-  IconMinimize,
   IconPhoto,
   IconPlus,
   IconPlayerPause,
@@ -30,17 +27,15 @@ import {
   Divider,
   Grid,
   Group,
-  Select,
+  SegmentedControl,
   Stack,
   Text,
   TextInput,
-  Textarea,
   ThemeIcon,
   Tooltip,
 } from '@mantine/core';
 import {
   formatDelta,
-  sceneOverlayAlpha,
   sceneTransitionOpacity,
   sceneTransitionTransform,
   type SceneTransition,
@@ -60,7 +55,6 @@ export function downloadSceneTopics(scenes: SceneModel[]) {
     lines.push(`Time:   ${s.start} – ${s.end} (${formatDelta(s.endSeconds - s.startSeconds)})`);
     if (s.description) lines.push(`Description: ${s.description}`);
     if (s.narration) lines.push(`Narration:   ${s.narration}`);
-    if (s.prompt) lines.push(`Image prompt: ${s.prompt}`);
     lines.push('');
   });
 
@@ -79,13 +73,20 @@ interface EditorViewProps {
   onOpenExport: () => void;
 }
 
+/** Plain-language explanation shown under the appearance picker. */
+const TRANSITION_HINTS: Record<SceneTransition, string> = {
+  cut: 'Hard cut in and out — the footage snaps back the moment the scene ends.',
+  fade: 'Blends in and out of the footage over 0.6s at each edge of the scene.',
+  crossfade: 'Softer 1.2s blend into the footage at each edge of the scene.',
+  kenburns: 'Slow push-in zoom across the whole scene — adds life to stills.',
+};
+
 export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewProps) {
   const {
     addScene,
     deleteScene,
-    moveSceneBoundary,
-    moveSceneStart,
-    resizeSceneEnd,
+    resizeScene,
+    moveScene,
     undo,
     redo,
     videoUrl,
@@ -111,6 +112,8 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
   // Live playhead time (seconds) reported by the inline player, so the timeline
   // can draw a visible scrub head at the exact position.
   const [playheadTime, setPlayheadTime] = useState(0);
+  // Phones stack the layout: preview first, then a capped-height scene list.
+  const isNarrow = useMediaQuery('(max-width: 62em)');
   const active = scenes.find((s) => s.id === activeId) ?? scenes[0];
 
   // Manual selection: make it authoritative for highlight AND force a seek.
@@ -135,31 +138,23 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
     return () => window.removeEventListener('keydown', onKey);
   }, [undo, redo]);
 
-  // Called by the timeline when a boundary is dragged to a new position.
-  const handleMoveBoundary = async (sceneId: number, newEnd: number) => {
+  // Called by the timeline while a scene's edge is being dragged. Neighbours
+  // never move — gaps are allowed, overlaps are clamped away by the context.
+  const handleResizeScene = (sceneId: number, side: 'start' | 'end', newTime: number) => {
     try {
-      await moveSceneBoundary(sceneId, newEnd);
+      resizeScene(sceneId, side, newTime, videoDuration);
     } catch (err) {
       setAddError(err instanceof Error ? err.message : 'Could not update scene timing');
     }
   };
 
-  // Called by the timeline when a scene's LEFT edge is dragged to a new position.
-  const handleMoveStart = async (sceneId: number, newStart: number) => {
+  // Called by the timeline while a whole scene is being slid to a new position
+  // (duration preserved).
+  const handleMoveScene = (sceneId: number, newStart: number) => {
     try {
-      await moveSceneStart(sceneId, newStart);
+      moveScene(sceneId, newStart, videoDuration);
     } catch (err) {
-      setAddError(err instanceof Error ? err.message : 'Could not update scene timing');
-    }
-  };
-
-  // Called by the timeline when the OVERFLOWING last scene's right edge is
-  // dragged (to pull its tail back within the video).
-  const handleResizeEnd = (sceneId: number, newEnd: number) => {
-    try {
-      resizeSceneEnd(sceneId, newEnd);
-    } catch (err) {
-      setAddError(err instanceof Error ? err.message : 'Could not resize the scene');
+      setAddError(err instanceof Error ? err.message : 'Could not move the scene');
     }
   };
 
@@ -198,12 +193,13 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
       {/* Toolbar */}
       <Group
         justify="space-between"
-        px="lg"
+        px={{ base: 'sm', sm: 'lg' }}
         py="sm"
+        wrap="wrap"
         style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
       >
         <Group>
-          <IconVideo size={20} color="var(--mantine-color-violet-6)" />
+          <IconVideo size={20} color="var(--ez-accent)" />
           <Text fw={700}>My Video</Text>
         </Group>
         <Group>
@@ -216,7 +212,7 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
           </Button>
           <Button
             variant="subtle"
-            leftSection={<IconPlus size={16} />}
+            leftSection={addingScene ? undefined : <IconPlus size={16} />}
             onClick={() => void handleAddScene()}
             loading={addingScene}
           >
@@ -237,40 +233,50 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
         </Alert>
       )}
 
-      {/* Timeline — the primary timing surface: drag a scene's edge to resize it. */}
-      <Box px="lg" py="md" bg="var(--mantine-color-dark-7)" style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}>
+      {/* Timeline — the primary timing surface: drag a scene's edge to resize it.
+          Quiet surface around it so the timeline stays the visual anchor. */}
+      <Box px="lg" py="md" bg="var(--ez-surface-2)" style={{ borderBottom: '1px solid var(--ez-line)' }}>
         <Group justify="space-between" mb="xs">
           <Text fw={600} size="sm" c="dimmed" tt="uppercase" style={{ letterSpacing: '0.08em' }}>
             Timeline
           </Text>
           <Text size="xs" c="dimmed">
-            Drag a scene's edge to make it longer or shorter · {scenes.length} scenes
+            Drag scene edges to trim · drag a scene to slide it · empty space shows raw footage ·{' '}
+            {scenes.length} scenes
           </Text>
         </Group>
         <SceneTimeline
           scenes={scenes}
           activeId={highlighted.id}
           onSelect={selectScene}
-          onMoveBoundary={handleMoveBoundary}
-          onMoveStart={handleMoveStart}
-          onResizeEnd={handleResizeEnd}
+          onResize={handleResizeScene}
+          onMoveScene={handleMoveScene}
           onSeek={(time) => setSeekTime(time)}
           videoDuration={videoDuration}
           playheadTime={playheadTime}
         />
       </Box>
 
-      {/* Master–detail layout: scene sidebar on the left, detail editor on the right. */}
+      {/* Master–detail layout: scene sidebar on the left, detail editor on the
+          right. On phones everything stacks and the preview comes first —
+          users see their video before the scene list. */}
       <Grid gap={0} style={{ flex: 1, alignItems: 'stretch' }}>
         {/* Scene sidebar */}
         <Grid.Col
           span={{ base: 12, md: 3, lg: 3 }}
+          order={{ base: 2, md: 1 }}
           style={{
             borderRight: '1px solid var(--mantine-color-default-border)',
             background: 'var(--mantine-color-body)',
           }}
         >
-          <Box style={{ position: 'sticky', top: 0, maxHeight: '100vh', overflowY: 'auto' }}>
+          <Box
+            style={
+              isNarrow
+                ? { maxHeight: '40vh', overflowY: 'auto' }
+                : { position: 'sticky', top: 0, maxHeight: '100vh', overflowY: 'auto' }
+            }
+          >
             <Group justify="space-between" px="md" py="sm" style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}>
               <Text fw={600} size="sm" c="dimmed" tt="uppercase" style={{ letterSpacing: '0.08em' }}>
                 Scenes
@@ -293,7 +299,7 @@ export function EditorView({ scenes, onOpenPreview, onOpenExport }: EditorViewPr
         </Grid.Col>
 
         {/* Detail area: persistent inline viewer (left) + per-scene editor (right) */}
-        <Grid.Col span={{ base: 12, md: 9, lg: 9 }}>
+        <Grid.Col span={{ base: 12, md: 9, lg: 9 }} order={{ base: 1, md: 2 }}>
           <Grid gap={0}>
             {/* Persistent full-preview viewer — clicking a scene seeks it here. */}
             <Grid.Col span={{ base: 12, lg: 5 }} style={{ padding: 'var(--mantine-spacing-lg)' }}>
@@ -357,9 +363,11 @@ function SceneRowItem({
         padding: 8,
         borderRadius: 'var(--mantine-radius-md)',
         cursor: 'pointer',
-        background: active ? 'var(--mantine-color-violet-0)' : 'transparent',
+        background: active ? 'var(--ez-accent-dim)' : 'transparent',
         border: '1px solid',
-        borderColor: active ? 'var(--mantine-color-violet-4)' : 'transparent',
+        borderColor: active ? 'var(--ez-accent)' : 'transparent',
+        // Signature: selected clip keeps an accent border + soft glow ring.
+        boxShadow: active ? '0 0 0 3px var(--ez-accent-dim)' : 'none',
         transition: 'background 120ms ease, border-color 120ms ease',
       }}
     >
@@ -370,7 +378,7 @@ function SceneRowItem({
           borderRadius: 'var(--mantine-radius-sm)',
           background: scene.imageUrl
             ? `url(${scene.imageUrl}) center / cover`
-            : 'var(--mantine-color-violet-1)',
+            : 'var(--ez-accent-dim)',
           flexShrink: 0,
           overflow: 'hidden',
           display: 'flex',
@@ -378,7 +386,7 @@ function SceneRowItem({
           justifyContent: 'center',
         }}
       >
-        {!scene.imageUrl && <IconPhoto size={14} color="var(--mantine-color-violet-6)" />}
+        {!scene.imageUrl && <IconPhoto size={14} color="var(--ez-accent)" />}
       </Box>
       <Stack gap={0} style={{ minWidth: 0 }}>
         <Text size="sm" fw={600} lineClamp={1}>
@@ -393,19 +401,22 @@ function SceneRowItem({
 }
 
 /**
- * A time-bound horizontal timeline: the track represents the full video
- * duration (fixed), and each scene is a proportional block positioned by its
- * start/end. Dragging the boundary between two scenes moves the cut — scene N's
- * end and scene N+1's start both slide to the new position, so the total video
- * length never changes.
+ * A time-bound horizontal timeline: the track represents the full media
+ * duration (fixed), and each scene is an independent proportional block.
+ *
+ * Interactions (the "in control" feel):
+ *  - Drag a block's LEFT/RIGHT edge to trim that scene — neighbours never move,
+ *    so deliberate gaps are easy and accidental destruction is impossible.
+ *  - Drag a block's BODY to slide the whole scene (duration preserved).
+ *  - Edges snap to the playhead, to neighbouring edges, and to the track ends.
+ *  - Click/drag empty space or the ruler to scrub the playhead.
  */
 function SceneTimeline({
   scenes,
   activeId,
   onSelect,
-  onMoveBoundary,
-  onMoveStart,
-  onResizeEnd,
+  onResize,
+  onMoveScene,
   onSeek,
   videoDuration,
   playheadTime,
@@ -413,41 +424,51 @@ function SceneTimeline({
   scenes: SceneModel[];
   activeId: number;
   onSelect: (id: number) => void;
-  onMoveBoundary: (sceneId: number, newEnd: number) => void;
-  onMoveStart: (sceneId: number, newStart: number) => void;
-  /** Called when the OVERFLOWING last scene's right edge is dragged — lets the
-   *  user pull the tail back within the video length. */
-  onResizeEnd?: (sceneId: number, newEnd: number) => void;
+  /** Called continuously while an edge is dragged (already snapped). */
+  onResize: (sceneId: number, side: 'start' | 'end', newTime: number) => void;
+  /** Called continuously while a whole scene is slid (duration preserved). */
+  onMoveScene?: (sceneId: number, newStart: number) => void;
   /** Called with an exact time (seconds) when the user clicks/scrubs the track
    *  to seek the playhead there (may be mid-scene). */
   onSeek?: (seconds: number) => void;
-  /** Real source-media duration (seconds). When provided, scenes whose end
-   *  exceeds this are flagged as "extended beyond the video" so the user can
-   *  adjust neighbours to fit. */
+  /** Real source-media duration (seconds). Defines the track length and caps
+   *  the last scene's right edge. */
   videoDuration?: number | null;
   /** Live playhead time (seconds) — draws a visible scrub head on the track. */
   playheadTime?: number;
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
-  const dragRef = useRef<{
-    sceneId: number;
-    side: 'left' | 'right';
-    sceneStart: number;
-    sceneEnd: number;
-    origBound: number; // the boundary being moved (start for left, end for right)
-    minBound: number;
-    maxBound: number;
-    startClientX: number;
-    total: number;
-    resizeTail?: boolean; // true when dragging the overflowing LAST scene's right edge
-  } | null>(null);
-  const [dragInfo, setDragInfo] = useState<{ newBound: number } | null>(null);
-  // Which boundary is hovered (key like "left-<id>" / "right-<id>") so the
-  // thin visible divider can highlight subtly before the user grabs it.
-  const [hoverBoundary, setHoverBoundary] = useState<string | null>(null);
+  const [trackWidth, setTrackWidth] = useState(0);
+
+  // Total track length: the real media duration when known; otherwise fall
+  // back to the furthest scene end so the timeline is still usable.
+  const maxSceneEnd = scenes.length ? Math.max(...scenes.map((s) => s.endSeconds)) : 1;
+  const total = Math.max(
+    1,
+    videoDuration && videoDuration > 0 ? Math.max(videoDuration, maxSceneEnd) : maxSceneEnd
+  );
+  const pxPerSec = trackWidth > 0 ? trackWidth / total : 800 / total;
+
+  type Drag =
+    | { kind: 'edge'; sceneId: number; side: 'start' | 'end'; origTime: number; startClientX: number }
+    | { kind: 'move'; sceneId: number; origStart: number; startClientX: number; moved: boolean };
+  const dragRef = useRef<Drag | null>(null);
+  // Floating timecode pill shown above the dragged edge/clip.
+  const [dragLabel, setDragLabel] = useState<{ xPct: number; text: string } | null>(null);
   // True while the user is dragging the playhead to scrub; lets the track keep
   // seeking on pointer-move instead of only on a single click.
   const scrubbingRef = useRef(false);
+
+  // Measure the track so snapping thresholds and ruler density are pixel-true.
+  useEffect(() => {
+    const el = trackRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) setTrackWidth(entry.contentRect.width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const seekFromClientX = (clientX: number) => {
     const el = trackRef.current;
@@ -457,90 +478,115 @@ function SceneTimeline({
     onSeek(frac * total);
   };
 
-  const lastId = scenes[scenes.length - 1]?.id;
-  // Fixed total = video length. Never changes during a boundary drag.
-  const total = Math.max(1, ...scenes.map((s) => s.endSeconds));
-  // Where the real footage ends (if known). Scenes past this overrun the video.
-  const mediaEnd = videoDuration && videoDuration > 0 ? videoDuration : total;
-  const hasOverflow = mediaEnd < total;
-
-  const beginDrag = (e: React.PointerEvent, scene: SceneModel, side: 'left' | 'right') => {
-    e.stopPropagation();
-    const el = trackRef.current;
-    if (!el) return;
-    const idx = scenes.findIndex((s) => s.id === scene.id);
-    if (idx === -1) return;
-    const prev = scenes[idx - 1];
-    const next = scenes[idx + 1];
-    if (side === 'right') {
-      // The last scene normally has no right boundary (fixed total). BUT if it
-      // OVERFLOWS past the video, let the user drag its right edge in to pull
-      // the tail back within the footage.
-      if (!next && !(onResizeEnd && scene.endSeconds > mediaEnd + 0.05)) return;
-      const resizeTail = !next;
-      dragRef.current = {
-        sceneId: scene.id,
-        side,
-        sceneStart: scene.startSeconds,
-        sceneEnd: scene.endSeconds,
-        origBound: scene.endSeconds,
-        // Shrink only (pull the right edge in toward the footage end).
-        minBound: scene.startSeconds + 0.3,
-        maxBound: scene.endSeconds,
-        startClientX: e.clientX,
-        total,
-        resizeTail,
-      };
-    } else {
-      if (!prev) return; // first scene has no left boundary
-      dragRef.current = {
-        sceneId: scene.id,
-        side,
-        sceneStart: scene.startSeconds,
-        sceneEnd: scene.endSeconds,
-        origBound: scene.startSeconds,
-        minBound: prev.startSeconds + 0.3,
-        maxBound: scene.endSeconds - 0.3,
-        startClientX: e.clientX,
-        total,
-      };
+  /** Snap candidates: track ends, the playhead, and every OTHER scene's edges. */
+  const snapTargets = (excludeSceneId: number): number[] => {
+    const targets = [0, total];
+    if (playheadTime != null && playheadTime > 0 && playheadTime <= total) {
+      targets.push(playheadTime);
     }
-    el.setPointerCapture(e.pointerId);
-    setDragInfo({ newBound: dragRef.current.origBound });
+    for (const s of scenes) {
+      if (s.id === excludeSceneId) continue;
+      targets.push(s.startSeconds, s.endSeconds);
+    }
+    return targets;
   };
 
-  const moveDrag = (e: React.PointerEvent) => {
+  const applySnap = (time: number, targets: number[]): number => {
+    const threshold = 8 / pxPerSec; // ~8px of magnetism
+    let best = time;
+    let bestDist = threshold;
+    for (const t of targets) {
+      const d = Math.abs(t - time);
+      if (d < bestDist) {
+        bestDist = d;
+        best = t;
+      }
+    }
+    return best;
+  };
+
+  const beginEdgeDrag = (e: React.PointerEvent, scene: SceneModel, side: 'start' | 'end') => {
+    e.stopPropagation();
+    dragRef.current = {
+      kind: 'edge',
+      sceneId: scene.id,
+      side,
+      origTime: side === 'start' ? scene.startSeconds : scene.endSeconds,
+      startClientX: e.clientX,
+    };
+    const el = trackRef.current;
+    if (el) {
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        /* no-op */
+      }
+    }
+  };
+
+  const beginMoveDrag = (e: React.PointerEvent, scene: SceneModel) => {
+    e.stopPropagation();
+    dragRef.current = {
+      kind: 'move',
+      sceneId: scene.id,
+      origStart: scene.startSeconds,
+      startClientX: e.clientX,
+      moved: false,
+    };
+    const el = trackRef.current;
+    if (el) {
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        /* no-op */
+      }
+    }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (scrubbingRef.current) {
+      seekFromClientX(e.clientX);
+      return;
+    }
     const drag = dragRef.current;
     const el = trackRef.current;
     if (!drag || !el) return;
-    const pxMoved = e.clientX - drag.startClientX;
-    const secondsPerPx = drag.total / (el.offsetWidth || 1);
-    const raw = drag.origBound + pxMoved * secondsPerPx;
-    const newBound = Math.min(Math.max(raw, drag.minBound), drag.maxBound);
-    setDragInfo({ newBound: Math.round(newBound * 100) / 100 });
+    const dt = (e.clientX - drag.startClientX) / pxPerSec;
+
+    if (drag.kind === 'edge') {
+      const raw = drag.origTime + dt;
+      const snapped = applySnap(raw, snapTargets(drag.sceneId));
+      onResize(drag.sceneId, drag.side, snapped);
+      setDragLabel({
+        xPct: Math.min(100, Math.max(0, (snapped / total) * 100)),
+        text: formatSecondsLabel(snapped),
+      });
+      return;
+    }
+
+    // Whole-scene slide: only commit after a small threshold so a plain click
+    // stays a selection, not a jittery move.
+    if (Math.abs(e.clientX - drag.startClientX) > 4) drag.moved = true;
+    if (!drag.moved || !onMoveScene) return;
+    const scene = scenes.find((s) => s.id === drag.sceneId);
+    if (!scene) return;
+    const dur = scene.endSeconds - scene.startSeconds;
+    const snapped = applySnap(drag.origStart + dt, snapTargets(drag.sceneId));
+    onMoveScene(drag.sceneId, snapped);
+    setDragLabel({
+      xPct: Math.min(100, Math.max(0, ((snapped + dur / 2) / total) * 100)),
+      text: `${formatSecondsLabel(snapped)} – ${formatSecondsLabel(snapped + dur)}`,
+    });
   };
 
   const endDrag = (e: React.PointerEvent) => {
     const drag = dragRef.current;
-    const el = trackRef.current;
-    if (drag && el) {
-      const pxMoved = e.clientX - drag.startClientX;
-      const secondsPerPx = drag.total / (el.offsetWidth || 1);
-      const raw = drag.origBound + pxMoved * secondsPerPx;
-      const newBound = Math.min(Math.max(raw, drag.minBound), drag.maxBound);
-      const bounded = Math.round(newBound * 100) / 100;
-      if (Math.abs(bounded - drag.origBound) > 0.1) {
-        if (drag.resizeTail) {
-          onResizeEnd?.(drag.sceneId, bounded);
-        } else if (drag.side === 'right') {
-          onMoveBoundary(drag.sceneId, bounded);
-        } else {
-          onMoveStart(drag.sceneId, bounded);
-        }
-      }
+    if (drag && drag.kind === 'move' && !drag.moved) {
+      onSelect(drag.sceneId);
     }
     dragRef.current = null;
-    setDragInfo(null);
+    setDragLabel(null);
+    const el = trackRef.current;
     if (el) {
       try {
         el.releasePointerCapture(e.pointerId);
@@ -551,25 +597,21 @@ function SceneTimeline({
   };
 
   const activeScene = scenes.find((s) => s.id === activeId) ?? scenes[0];
-  const draggingScene = dragRef.current ? scenes.find((s) => s.id === dragRef.current!.sceneId) : null;
-  const dragDuration =
-    draggingScene && dragInfo
-      ? dragRef.current?.side === 'right'
-        ? dragInfo.newBound - draggingScene.startSeconds
-        : draggingScene.endSeconds - dragInfo.newBound
-      : 0;
+
+  // Adaptive ruler density: pick the smallest step whose label still gets ~64px
+  // of breathing room, so the ruler never turns into a crowded mess.
+  const rulerStep =
+    [1, 2, 5, 10, 15, 30, 60, 120, 300, 600].find((s) => s * pxPerSec >= 64) ?? 600;
+  const ticks: number[] = [];
+  for (let t = 0; t <= total + 0.001; t += rulerStep) ticks.push(t);
 
   return (
     <Stack gap={8}>
       <Box
         ref={trackRef}
         onPointerDown={(e) => {
-          // Grab the playhead: seek to the exact point and keep scrubbing while
-          // the pointer moves (so the user can drag the head anywhere). Scene
-          // blocks stopPropagation, so this fires on the track background AND on
-          // the dedicated playhead handle (see playhead marker below, which is
-          // also the scrub grab point at higher z-index).
-          if (dragInfo) return; // not while resizing a scene boundary
+          // Empty track / ruler / gaps = scrub surface. Scene blocks and edge
+          // handles stopPropagation, so this only fires on genuinely empty area.
           if (!onSeek) return;
           scrubbingRef.current = true;
           seekFromClientX(e.clientX);
@@ -582,13 +624,7 @@ function SceneTimeline({
             }
           }
         }}
-        onPointerMove={(e) => {
-          if (scrubbingRef.current) {
-            seekFromClientX(e.clientX);
-            return;
-          }
-          moveDrag(e);
-        }}
+        onPointerMove={handlePointerMove}
         onPointerUp={(e) => {
           if (scrubbingRef.current) {
             scrubbingRef.current = false;
@@ -606,81 +642,69 @@ function SceneTimeline({
         }}
         onPointerCancel={() => {
           scrubbingRef.current = false;
+          dragRef.current = null;
+          setDragLabel(null);
         }}
         style={{
           position: 'relative',
-          height: 72,
+          height: 96,
           width: '100%',
           borderRadius: 'var(--mantine-radius-md)',
-          background: 'var(--mantine-color-dark-6)',
-          border: '1px solid var(--mantine-color-default-border)',
+          background: 'var(--ez-surface-3)',
+          // Deliberate "empty time" texture: wherever no scene block sits, this
+          // subtle diagonal hatch shows through — gaps read as intentional.
+          backgroundImage:
+            'repeating-linear-gradient(135deg, rgba(255,255,255,0.035) 0 6px, transparent 6px 12px)',
+          border: '1px solid var(--ez-line)',
           overflow: 'hidden',
           userSelect: 'none',
           touchAction: 'none',
           cursor: 'pointer',
         }}
       >
-        {/* Time ruler ticks + start/end */}
-        <Text size="xs" c="dimmed" style={{ position: 'absolute', left: 6, top: 4, pointerEvents: 'none', fontVariantNumeric: 'tabular-nums' }}>
-          0:00
-        </Text>
-        {[0.25, 0.5, 0.75].map((frac) => (
+        {/* Time ruler — real clock ticks with mono labels (a tool, not a form).
+            Density adapts to zoom so labels never collide. */}
+        {ticks.map((t) => (
           <Box
-            key={frac}
+            key={`tick-${t}`}
             style={{
               position: 'absolute',
-              left: `${frac * 100}%`,
+              left: `${Math.min(100, (t / total) * 100)}%`,
               top: 0,
               bottom: 0,
               width: 1,
-              background: 'var(--mantine-color-dark-4)',
+              background: 'var(--ez-line)',
+              pointerEvents: 'none',
+              zIndex: 0,
             }}
           />
         ))}
-        <Text size="xs" c="dimmed" style={{ position: 'absolute', right: 6, top: 4, pointerEvents: 'none', fontVariantNumeric: 'tabular-nums' }}>
-          {formatSecondsLabel(total)}
-        </Text>
-
-        {/* Video-end boundary + overflow region: if any scene extends past the
-            real footage length, shade that region red and mark the end line so
-            the user sees exactly how much overruns and can adjust neighbours. */}
-        {hasOverflow && (
-          <>
-            <Box
-              style={{
-                position: 'absolute',
-                left: `${(mediaEnd / total) * 100}%`,
-                top: 0,
-                bottom: 0,
-                width: 2,
-                background: 'var(--mantine-color-red-6)',
-                zIndex: 2,
-                pointerEvents: 'none',
-              }}
-            />
-            <Box
-              style={{
-                position: 'absolute',
-                left: `${(mediaEnd / total) * 100}%`,
-                right: 0,
-                top: 0,
-                bottom: 0,
-                background: 'rgba(250,82,82,0.12)',
-                borderLeft: '2px dashed var(--mantine-color-red-6)',
-                zIndex: 1,
-                pointerEvents: 'none',
-              }}
-            />
-            <Badge
-              size="xs"
-              color="red"
-              variant="filled"
-              style={{ position: 'absolute', left: `${(mediaEnd / total) * 100}%`, top: -6, transform: 'translateX(-50%)', zIndex: 4, pointerEvents: 'none' }}
-            >
-              video ends
-            </Badge>
-          </>
-        )}
+        {ticks.map((t) => (
+          <Text
+            key={`label-${t}`}
+            size="xs"
+            c="dimmed"
+            className="ez-timecode"
+            style={{
+              position: 'absolute',
+              left: `${Math.min(100, (t / total) * 100)}%`,
+              top: 3,
+              transform:
+                t === 0
+                  ? 'none'
+                  : t >= total - rulerStep / 2
+                    ? 'translateX(-100%)'
+                    : 'translateX(-50%)',
+              paddingLeft: t === 0 ? 4 : 0,
+              paddingRight: t >= total - rulerStep / 2 ? 4 : 0,
+              pointerEvents: 'none',
+              zIndex: 0,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {formatSecondsLabel(t)}
+          </Text>
+        ))}
 
         {/* Playhead — a DRAGGABLE scrub head. Grab it and drag anywhere on the
             track to scrub playback to that exact time (works over scene blocks
@@ -724,183 +748,162 @@ function SceneTimeline({
                 position: 'absolute',
                 left: '50%',
                 transform: 'translateX(-50%)',
-                top: 0,
+                top: 8,
                 bottom: 0,
-                width: 3,
+                width: 2.5,
                 background: '#fff',
-                boxShadow: '0 0 0 1px rgba(124,58,237,0.35), 0 0 8px rgba(255,255,255,0.8)',
+                boxShadow: '0 0 0 1px rgba(124,108,246,0.45), 0 0 8px rgba(255,255,255,0.85)',
                 pointerEvents: 'none',
               }}
             />
+            {/* Circular handle — always higher-contrast than anything else on screen. */}
             <Box
               style={{
                 position: 'absolute',
-                top: -3,
+                top: 2,
                 left: '50%',
                 transform: 'translateX(-50%)',
-                width: 0,
-                height: 0,
-                borderLeft: '7px solid transparent',
-                borderRight: '7px solid transparent',
-                borderTop: '9px solid #fff',
-                filter: 'drop-shadow(0 1px 2px rgba(124,58,237,0.4))',
+                width: 14,
+                height: 14,
+                borderRadius: '50%',
+                background: '#fff',
+                border: '3px solid var(--ez-accent)',
+                boxShadow: '0 0 0 1px rgba(0,0,0,0.25), 0 2px 6px rgba(0,0,0,0.4)',
                 pointerEvents: 'none',
               }}
             />
           </Box>
         )}
 
-        {scenes.map((scene, i) => {
-          const isLast = scene.id === lastId;
-          const isFirst = i === 0;
+        {scenes.map((scene) => {
           const isActive = scene.id === activeId;
-          // A scene "overflows" when it extends past the real footage length.
-          const overflows = scene.endSeconds > mediaEnd + 0.05;
-          const drag = dragRef.current;
-          const dragging = drag && dragInfo && drag.sceneId === scene.id;
-          const dragLeftNeighbor = drag && dragInfo && drag.side === 'left' && scenes[i + 1]?.id === drag.sceneId;
-          const dragRightNeighbor = drag && dragInfo && drag.side === 'right' && scenes[i - 1]?.id === drag.sceneId;
-
-          // Compute live left edge + live right edge during a drag.
-          let liveLeft = scene.startSeconds;
-          let liveEnd = scene.endSeconds;
-          if (drag && dragInfo) {
-            if (dragLeftNeighbor) liveLeft = dragInfo.newBound;
-            else if (dragRightNeighbor) liveEnd = dragInfo.newBound;
-            else if (dragging && drag.side === 'left') liveLeft = dragInfo.newBound;
-            else if (dragging && drag.side === 'right') liveEnd = dragInfo.newBound;
-          }
-          const left = (liveLeft / total) * 100;
-          const width = (Math.max(0, liveEnd - liveLeft) / total) * 100;
-          const duration = formatDelta(Math.max(0, liveEnd - liveLeft));
+          const left = (scene.startSeconds / total) * 100;
+          const widthPct = Math.max(((scene.endSeconds - scene.startSeconds) / total) * 100, 0.6);
+          const duration = formatDelta(Math.max(0, scene.endSeconds - scene.startSeconds));
 
           return (
             <Box
               key={scene.id}
-              onPointerDown={(e) => {
-                if (dragInfo) return;
-                e.stopPropagation(); // scene click = scene-start seek, not track seek
-                onSelect(scene.id);
-              }}
+              onPointerDown={(e) => beginMoveDrag(e, scene)}
+              role="button"
+              tabIndex={-1}
+              aria-label={`Scene ${scene.number}: ${scene.title}`}
               style={{
                 position: 'absolute',
                 left: `${left}%`,
-                width: `${Math.max(1.2, width)}%`,
+                width: `${widthPct}%`,
                 top: 22,
-                bottom: 12,
+                bottom: 8,
                 borderRadius: 8,
-                background: isActive
-                  ? 'var(--mantine-color-violet-6)'
-                  : 'var(--mantine-color-violet-4)',
-                opacity: isActive ? 1 : 0.8,
-                cursor: 'default',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
+                overflow: 'hidden',
                 boxSizing: 'border-box',
-                border: isActive
-                  ? '2px solid rgba(255,255,255,0.45)'
-                  : overflows
-                  ? '2px solid var(--mantine-color-red-6)'
-                  : 'none',
-                boxShadow: overflows ? '0 0 0 1px var(--mantine-color-red-6)' : undefined,
-                minWidth: 22,
-                transition: 'background 120ms ease',
+                background: scene.imageUrl
+                  ? `linear-gradient(rgba(10,10,15,0.45), rgba(10,10,15,0.55)), url(${scene.imageUrl}) center / cover`
+                  : 'linear-gradient(135deg, var(--ez-surface-2), var(--ez-surface-1))',
+                cursor: 'grab',
+                border: isActive ? '2px solid var(--ez-accent)' : '1px solid var(--ez-line-strong)',
+                // Signature: selected clip keeps an accent border + soft glow ring.
+                boxShadow: isActive
+                  ? '0 0 0 3px var(--ez-accent-dim), 0 2px 8px rgba(0,0,0,0.35)'
+                  : '0 1px 4px rgba(0,0,0,0.25)',
+                minWidth: 18,
+                transition: 'border-color 120ms ease, box-shadow 120ms ease',
+                zIndex: 1,
               }}
             >
-              <Stack gap={0} align="center" style={{ pointerEvents: 'none', minWidth: 0 }}>
-                <Text size="sm" fw={700} c="white" lh={1.2}>
-                  {overflows ? '⚠' : String(scene.number).padStart(2, '0')}
+              {/* Label plate — number + duration in the mono face */}
+              <Stack
+                gap={0}
+                align="flex-start"
+                style={{
+                  pointerEvents: 'none',
+                  minWidth: 0,
+                  position: 'absolute',
+                  left: 6,
+                  bottom: 4,
+                  right: 6,
+                }}
+              >
+                <Text size="xs" fw={700} c="white" lh={1.2} lineClamp={1} style={{ textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
+                  {String(scene.number).padStart(2, '0')}
                 </Text>
-                {width > 7 && (
-                  <Text size="xs" c="white" opacity={0.9} lh={1.2} style={{ whiteSpace: 'nowrap' }}>
+                {widthPct > 7 && (
+                  <Text size="xs" c="white" opacity={0.85} lh={1.2} className="ez-timecode" style={{ whiteSpace: 'nowrap', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
                     {duration}
                   </Text>
                 )}
               </Stack>
 
-              {/* Draggable LEFT edge (only for non-first scenes) — stretch the start.
-                  Wide invisible hitbox (~11px each side) so the thin divider is
-                  easy to grab; only this hitbox shows the ew-resize cursor. */}
-              {!isFirst && (
+              {/* LEFT edge handle — trim this scene's start. Wide hitbox so it
+                  is easy to grab (and touch-friendly); brightens on hover via
+                  the active state. */}
+              <Box
+                onPointerDown={(e) => beginEdgeDrag(e, scene, 'start')}
+                style={{
+                  position: 'absolute',
+                  left: -6,
+                  top: 0,
+                  bottom: 0,
+                  width: 24,
+                  cursor: 'ew-resize',
+                  zIndex: 3,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
                 <Box
-                  onPointerDown={(e) => beginDrag(e, scene, 'left')}
-                  onMouseEnter={() => setHoverBoundary(`left-${scene.id}`)}
-                  onMouseLeave={() => setHoverBoundary((h) => (h === `left-${scene.id}` ? null : h))}
                   style={{
-                    position: 'absolute',
-                    left: -11,
-                    top: -22,
-                    bottom: -12,
-                    width: 22,
-                    cursor: 'ew-resize',
-                    zIndex: 3,
+                    width: isActive ? 4 : 3,
+                    height: '46%',
+                    borderRadius: 2,
+                    background: isActive ? '#fff' : 'rgba(255,255,255,0.55)',
+                    transition: 'background 120ms ease',
                   }}
-                >
-                  <Box
-                    style={{
-                      position: 'absolute',
-                      top: 22,
-                      bottom: 12,
-                      left: '50%',
-                      transform: 'translateX(-50%)',
-                      width: hoverBoundary === `left-${scene.id}` ? 6 : 3,
-                      background:
-                        hoverBoundary === `left-${scene.id}` ? '#fff' : isActive ? '#fff' : 'rgba(255,255,255,0.65)',
-                      borderRadius: 2,
-                      transition: 'width 120ms ease, background 120ms ease',
-                    }}
-                  />
-                </Box>
-              )}
+                />
+              </Box>
 
-              {/* Draggable boundary — between scenes, OR the right edge of an
-                  overflowing last scene (so its tail can be pulled back in). */}
-              {(!isLast || (isLast && overflows && !!onResizeEnd)) && (
+              {/* RIGHT edge handle — trim this scene's end. */}
+              <Box
+                onPointerDown={(e) => beginEdgeDrag(e, scene, 'end')}
+                style={{
+                  position: 'absolute',
+                  right: -6,
+                  top: 0,
+                  bottom: 0,
+                  width: 24,
+                  cursor: 'ew-resize',
+                  zIndex: 3,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
                 <Box
-                  onPointerDown={(e) => beginDrag(e, scene, 'right')}
-                  onMouseEnter={() => setHoverBoundary(`right-${scene.id}`)}
-                  onMouseLeave={() => setHoverBoundary((h) => (h === `right-${scene.id}` ? null : h))}
                   style={{
-                    position: 'absolute',
-                    right: -11,
-                    top: -22,
-                    bottom: -12,
-                    width: 22,
-                    cursor: 'ew-resize',
-                    zIndex: 3,
+                    width: isActive ? 4 : 3,
+                    height: '46%',
+                    borderRadius: 2,
+                    background: isActive ? '#fff' : 'rgba(255,255,255,0.55)',
+                    transition: 'background 120ms ease',
                   }}
-                >
-                  <Box
-                    style={{
-                      position: 'absolute',
-                      top: 22,
-                      bottom: 12,
-                      left: '50%',
-                      transform: 'translateX(-50%)',
-                      width: hoverBoundary === `right-${scene.id}` ? 6 : 3,
-                      background:
-                        hoverBoundary === `right-${scene.id}` ? '#fff' : isActive ? '#fff' : 'rgba(255,255,255,0.65)',
-                      borderRadius: 2,
-                      transition: 'width 120ms ease, background 120ms ease',
-                    }}
-                  />
-                </Box>
-              )}
+                />
+              </Box>
             </Box>
           );
         })}
 
-        {/* Live size bubble while dragging a boundary */}
-        {draggingScene && dragInfo && dragRef.current && (
+        {/* Floating timecode pill while dragging an edge or sliding a clip */}
+        {dragLabel && (
           <Box
+            className="ez-timecode"
             style={{
               position: 'absolute',
-              left: `${Math.max(0, Math.min(100, (dragInfo.newBound / total) * 100))}%`,
+              left: `${dragLabel.xPct}%`,
               top: 0,
               transform: 'translateX(-50%)',
               background: '#fff',
-              color: 'var(--mantine-color-violet-7)',
+              color: 'var(--ez-accent)',
               borderRadius: 999,
               padding: '2px 10px',
               fontSize: 12,
@@ -908,10 +911,10 @@ function SceneTimeline({
               whiteSpace: 'nowrap',
               boxShadow: 'var(--mantine-shadow-md)',
               pointerEvents: 'none',
-              zIndex: 5,
+              zIndex: 9,
             }}
           >
-            {String(draggingScene.number).padStart(2, '0')} · {formatDelta(dragDuration)}
+            {dragLabel.text}
           </Box>
         )}
       </Box>
@@ -922,24 +925,14 @@ function SceneTimeline({
           Scene {String(activeScene.number).padStart(2, '0')}
         </Text>
         <Group gap="md">
-          <Text size="sm" c="dimmed" style={{ fontVariantNumeric: 'tabular-nums' }}>
+          <Text size="sm" c="dimmed" className="ez-timecode">
             {formatSecondsLabel(activeScene.startSeconds)} – {formatSecondsLabel(activeScene.endSeconds)}
           </Text>
-          <Badge variant="light" color="violet" size="sm">
+          <Badge variant="light" color="brand" size="sm" className="ez-timecode">
             {formatDelta(activeScene.endSeconds - activeScene.startSeconds)}
           </Badge>
         </Group>
       </Group>
-
-      {/* Overflow warning — a scene extends past the footage, so the user can
-          pull neighbours' edges to bring it back within the video. */}
-      {hasOverflow && (
-        <Text size="xs" c="red" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 2px' }}>
-          <IconAlertCircle size={14} />
-          Some scenes extend past the video length — drag a scene edge to fit it
-          back within the footage ({formatDelta(mediaEnd)}).
-        </Text>
-      )}
     </Stack>
   );
 }
@@ -1102,7 +1095,7 @@ function InlinePreview({
             aspectRatio: '16 / 9',
             background: activeScene.imageUrl
               ? `url(${activeScene.imageUrl}) center / cover`
-              : 'var(--mantine-color-violet-1)',
+              : 'var(--ez-accent-dim)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -1179,12 +1172,11 @@ function InlinePreview({
                 >
                   <ActionIcon
                     variant="filled"
-                    color="violet"
                     radius="xl"
                     size={60}
                     aria-label="Play"
                     onClick={startPlayback}
-                    style={{ boxShadow: '0 4px 16px rgba(0,0,0,0.35)', opacity: 0.95 }}
+                    style={{ boxShadow: 'var(--mantine-shadow-brand)', opacity: 0.95 }}
                   >
                     <IconPlayerPlay size={28} fill="currentColor" />
                   </ActionIcon>
@@ -1202,12 +1194,11 @@ function InlinePreview({
             <Center style={{ position: 'absolute', inset: 0 }}>
               <ActionIcon
                 variant="filled"
-                color="violet"
                 radius="xl"
                 size={60}
                 aria-label="Pause"
                 onClick={stopPlayback}
-                style={{ boxShadow: '0 4px 16px rgba(0,0,0,0.35)', opacity: 0.95 }}
+                style={{ boxShadow: 'var(--mantine-shadow-brand)', opacity: 0.95 }}
               >
                 <IconPlayerPause size={28} fill="currentColor" />
               </ActionIcon>
@@ -1226,7 +1217,7 @@ function InlinePreview({
                 pointerEvents: 'none',
               }}
             >
-              <Text size="xs" c="white" style={{ fontVariantNumeric: 'tabular-nums' }}>
+              <Text size="xs" c="white" className="ez-timecode">
                 {formatSecondsLabel(playTime)}
               </Text>
             </Group>
@@ -1238,10 +1229,10 @@ function InlinePreview({
           Scene image · tap ▶ to play in place
         </Text>
         <Group gap="xs">
-          <Text size="xs" c="dimmed" style={{ fontVariantNumeric: 'tabular-nums' }}>
+          <Text size="xs" c="dimmed" className="ez-timecode">
             {formatSecondsLabel(activeScene.startSeconds)} – {formatSecondsLabel(activeScene.endSeconds)}
           </Text>
-          <Badge variant="light" color="violet" size="xs">
+          <Badge variant="light" color="brand" size="xs" className="ez-timecode">
             {formatDelta(activeScene.endSeconds - activeScene.startSeconds)}
           </Badge>
         </Group>
@@ -1264,26 +1255,20 @@ function SceneEditor({
   const { updateScene, regenerateImage, undo, redo, canUndo, canRedo, historyToken, changeWithAI } =
     useVideoFlow();
   const [title, setTitle] = useState(scene.title);
-  const [prompt, setPrompt] = useState(scene.prompt);
   const [regenerating, setRegenerating] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // "Change with AI" — inline instruction input (kept separate so it never
-  // triggers the manual-prompt autosave).
+  // "Change with AI" — inline instruction input.
   const [aiOpen, setAiOpen] = useState(false);
   const [aiInstruction, setAiInstruction] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
-  const [aiReason, setAiReason] = useState<string | null>(null);
-  // The prompt is locked (read-only) by default to prevent accidental AI
-  // regenerations that spend credits. Unlock before editing.
-  const [promptLocked, setPromptLocked] = useState(true);
-  const [promptExpanded, setPromptExpanded] = useState(false);
+  const [aiDone, setAiDone] = useState(false);
   const saveTimer = useRef<number | null>(null);
   const lastHistoryTokenRef = useRef(historyToken);
 
-  // Sync title + prompt edits into the shared scene state. This updates the
-  // local draft (written to localStorage instantly) — the backend is ONLY hit on
-  // page leave / hide / pause, so no per-change network calls.
+  // Sync title edits into the shared scene state. This updates the local draft
+  // (written to localStorage instantly) — the backend is ONLY hit on page leave
+  // / hide / pause, so no per-change network calls.
   //
   // When historyToken changes (an undo/redo just restored a snapshot), we DON'T
   // autosave — instead we sync the field back to the restored scene so the stale
@@ -1293,26 +1278,24 @@ function SceneEditor({
     if (lastHistoryTokenRef.current !== historyToken) {
       lastHistoryTokenRef.current = historyToken;
       setTitle(scene.title);
-      setPrompt(scene.prompt);
       return;
     }
-    const changed = title !== scene.title || prompt !== scene.prompt;
-    if (!changed) return;
+    if (title === scene.title) return;
     const t = window.setTimeout(() => {
-      updateScene(scene.id, { scene_title: title, image_prompt: prompt });
+      updateScene(scene.id, { scene_title: title });
       setSaved(true);
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => setSaved(false), 2000);
     }, 250);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [title, prompt, scene.id, scene.title, scene.prompt, historyToken]);
+  }, [title, scene.id, scene.title, historyToken]);
 
   const handleRegenerate = async () => {
     setRegenerating(true);
     setError(null);
     try {
-      await regenerateImage(scene.id, prompt);
+      await regenerateImage(scene.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to regenerate image');
     } finally {
@@ -1320,7 +1303,9 @@ function SceneEditor({
     }
   };
 
-  // "Change with AI": revise the prompt from a short instruction + regenerate.
+  // "Change with AI": the user describes the change in plain language; the
+  // backend revises its internal prompt and regenerates. The prompt itself is
+  // never shown — the UI just confirms the update.
   const handleChangeWithAI = async () => {
     const instruction = aiInstruction.trim();
     if (!instruction) {
@@ -1330,10 +1315,8 @@ function SceneEditor({
     setAiBusy(true);
     setError(null);
     try {
-      const updated = await changeWithAI(scene.id, instruction);
-      // Reflect the revised prompt in the editor + reset the instruction field.
-      setPrompt(updated.prompt);
-      setAiReason((updated as SceneModel & { reason?: string }).reason ?? 'Updated.');
+      await changeWithAI(scene.id, instruction);
+      setAiDone(true);
       setAiOpen(false);
       setAiInstruction('');
     } catch (err) {
@@ -1343,15 +1326,12 @@ function SceneEditor({
     }
   };
 
-  const PROMPT_MAX = 1000;
-  const PREVIEW_CHARS = 220;
-
   return (
     <Box py="lg" px="xl">
-      {/* Header: scene number + title + status */}
-      <Group justify="space-between" align="center" wrap="nowrap" mb="lg">
+      {/* Header: scene number + title + status (wraps on narrow screens) */}
+      <Group justify="space-between" align="center" mb="lg">
         <Group gap="md" align="center" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
-          <ThemeIcon variant="light" radius="lg" size={46} color="violet" style={{ flexShrink: 0 }}>
+          <ThemeIcon variant="light" radius="lg" size={46} color="brand" style={{ flexShrink: 0 }}>
             <Text fw={700} size="md">
               {String(scene.number).padStart(2, '0')}
             </Text>
@@ -1380,115 +1360,61 @@ function SceneEditor({
       )}
 
       <Stack gap="md">
-        {/* Visual prompt */}
+        {/* Scene image — regenerate / change with AI. The internal prompt is
+            never shown: it's a business secret. Users shape the image through
+            the plain-language "Change with AI" instruction instead. */}
         <Card withBorder radius="xl" padding="lg">
           <Stack gap="sm">
             <Group justify="space-between" align="center">
               <Group gap="xs">
                 <Text fw={600} size="sm">
-                  Visual prompt
+                  Scene image
                 </Text>
                 <Badge variant="light" size="sm">
                   Image model
                 </Badge>
               </Group>
-              <Tooltip
-                label={promptLocked ? 'Unlock to edit the prompt' : 'Lock the prompt'}
-                withArrow
-              >
-                <ActionIcon
-                  variant={promptLocked ? 'light' : 'filled'}
-                  color={promptLocked ? 'gray' : 'violet'}
-                  radius="xl"
-                  onClick={() => setPromptLocked((v) => !v)}
-                  aria-label={promptLocked ? 'Unlock prompt' : 'Lock prompt'}
-                >
-                  {promptLocked ? <IconLock size={16} /> : <IconLockOpen size={16} />}
-                </ActionIcon>
-              </Tooltip>
             </Group>
 
-            {promptLocked ? (
-              /* Locked — read-only preview with a collapse/expand toggle for long prompts. */
-              <Box>
-                <Text size="sm" lh={1.6} lineClamp={promptExpanded ? undefined : 3}>
-                  {prompt || 'No prompt yet — unlock to write a description.'}
-                </Text>
-                {prompt.length > PREVIEW_CHARS && (
-                  <Button
-                    size="xs"
-                    variant="subtle"
-                    color="gray"
-                    rightSection={
-                      promptExpanded ? <IconMinimize size={14} /> : <IconMaximize size={14} />
-                    }
-                    mt="xs"
-                    onClick={() => setPromptExpanded((v) => !v)}
-                  >
-                    {promptExpanded ? 'Show less' : 'Show more'}
-                  </Button>
-                )}
-              </Box>
-            ) : (
-              /* Unlocked — editable textarea with a character limit. */
-              <>
-                <Textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.currentTarget.value.slice(0, PROMPT_MAX))}
-                  minRows={4}
-                  maxRows={12}
-                  autosize
-                  maxLength={PROMPT_MAX}
-                  placeholder="Describe the image you want for this scene..."
-                />
-                <Group justify="space-between" align="center">
-                  <Text size="xs" c="dimmed">
-                    {prompt.length}/{PROMPT_MAX}
-                  </Text>
+            <Group justify="space-between" align="center" wrap="wrap" gap="sm">
+              <Text size="xs" c="dimmed" style={{ minWidth: 0 }}>
+                {scene.regenerateCount > 0
+                  ? `Regenerated ${scene.regenerateCount} time${scene.regenerateCount === 1 ? '' : 's'} · uses a credit`
+                  : 'Recreate this frame, or tell the AI what to change.'}
+              </Text>
+              <Group gap="xs" wrap="wrap" style={{ flexShrink: 0 }}>
+                <Button
+                  size="xs"
+                  variant="light"
+                  color="brand"
+                  loading={regenerating}
+                  loaderProps={{ size: 14 }}
+                  onClick={handleRegenerate}
+                >
+                  Regenerate
+                </Button>
+                <Tooltip
+                  label="Describe the change in plain words — the AI recreates the frame."
+                  withArrow
+                >
                   <Button
                     size="xs"
                     variant="light"
-                    color="violet"
-                    loading={regenerating}
-                    disabled={!prompt.trim()}
-                    onClick={handleRegenerate}
-                  >
-                    Regenerate from prompt
-                  </Button>
-                </Group>
-              </>
-            )}
-
-            <Divider />
-            <Group justify="space-between" align="center">
-              <Text size="xs" c="dimmed">
-                {scene.regenerateCount > 0
-                  ? `Regenerated ${scene.regenerateCount} time${scene.regenerateCount === 1 ? '' : 's'} · uses a credit`
-                  : 'Recreate this frame from the prompt.'}
-              </Text>
-              <Tooltip
-                label="Tell the AI what to change — it rewrites the prompt and regenerates the image."
-                withArrow
-              >
-                <span>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    color="violet"
+                    color="brand"
                     leftSection={<IconSparkles size={14} />}
                     onClick={() => {
                       setAiOpen((v) => !v);
-                      setAiReason(null);
+                      setAiDone(false);
                     }}
                   >
                     Change with AI
                   </Button>
-                </span>
-              </Tooltip>
+                </Tooltip>
+              </Group>
             </Group>
 
             {aiOpen && (
-              <Group gap="xs" align="flex-end" wrap="nowrap">
+              <Group gap="xs" align="flex-end" wrap="wrap">
                 <TextInput
                   flex={1}
                   size="sm"
@@ -1503,8 +1429,9 @@ function SceneEditor({
                 />
                 <Button
                   size="sm"
-                  color="violet"
+                  color="brand"
                   loading={aiBusy}
+                  loaderProps={{ size: 16 }}
                   disabled={!aiInstruction.trim()}
                   onClick={() => void handleChangeWithAI()}
                 >
@@ -1513,50 +1440,81 @@ function SceneEditor({
               </Group>
             )}
 
-            {aiReason && (
+            {(regenerating || aiBusy) && (
               <Text size="xs" c="dimmed" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <IconSparkles size={14} color="var(--mantine-color-violet-6)" />
-                {aiReason}
+                <IconSparkles size={14} color="var(--ez-accent-b)" />
+                Recreating your frame — this can take up to a minute…
+              </Text>
+            )}
+
+            {aiDone && (
+              <Text size="xs" c="dimmed" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <IconSparkles size={14} color="var(--ez-accent-b)" />
+                Scene updated.
               </Text>
             )}
           </Stack>
         </Card>
 
-        {/* Transition — how this scene's image is shown over the footage */}
+        {/* Appearance — how this scene's generated frame covers the footage.
+            The frame displays for EXACTLY the scene's time window (shown in
+            the badge); before and after it, the raw video plays untouched. */}
         <Card withBorder radius="xl" padding="lg">
           <Stack gap="sm">
-            <Text fw={600} size="sm">
-              Transition
-            </Text>
-            <Text size="xs" c="dimmed">
-              How the scene image plays over your footage.
-            </Text>
-            <Select
-              data={[
-                { value: 'cut', label: 'Cut — plain switch' },
-                { value: 'fade', label: 'Fade to black' },
-                { value: 'crossfade', label: 'Crossfade with footage' },
-                { value: 'kenburns', label: 'Ken Burns (slow zoom)' },
-              ]}
+            <Group justify="space-between" align="center" wrap="wrap">
+              <Text fw={600} size="sm">
+                How this scene appears
+              </Text>
+              <Badge variant="light" size="sm" className="ez-timecode">
+                frame on screen {scene.start} – {scene.end}
+              </Badge>
+            </Group>
+            <SegmentedControl
+              fullWidth
+              size="xs"
               value={scene.transition}
               onChange={(value) => {
-                if (!value) return;
                 updateScene(scene.id, { transition: value as SceneTransition });
+                setSaved(true);
+                if (saveTimer.current) window.clearTimeout(saveTimer.current);
+                saveTimer.current = window.setTimeout(() => setSaved(false), 2000);
               }}
+              data={[
+                { label: 'Cut', value: 'cut' },
+                { label: 'Fade', value: 'fade' },
+                { label: 'Crossfade', value: 'crossfade' },
+                { label: 'Ken Burns', value: 'kenburns' },
+              ]}
             />
+            <Text size="xs" c="dimmed">
+              {TRANSITION_HINTS[scene.transition]}
+            </Text>
           </Stack>
         </Card>
+
       </Stack>
 
       {/* Footer — undo/redo + destructive delete (everything autosaves, so no Save button) */}
       <Divider my="lg" />
-      <Group justify="space-between" align="center" style={{ position: 'sticky', bottom: 0, background: 'var(--mantine-color-body)', padding: '10px 4px', zIndex: 5 }}>
+      <Group
+        justify="space-between"
+        align="center"
+        wrap="wrap"
+        gap="sm"
+        style={{
+          position: 'sticky',
+          bottom: 0,
+          background: 'var(--mantine-color-body)',
+          padding: '10px 4px',
+          zIndex: 5,
+        }}
+      >
         <Tooltip label="Remove this scene (use Undo to bring it back)" withArrow>
           <span>
             <Button
               variant="subtle"
               color="red"
-              leftSection={<IconTrash size={16} />}
+              leftSection={deleting ? undefined : <IconTrash size={16} />}
               disabled={!allowDelete || deleting}
               loading={deleting}
               onClick={onDelete}

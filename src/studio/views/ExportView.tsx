@@ -1,444 +1,256 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { IconCheck, IconDownload, IconLoader2, IconVideo } from '@tabler/icons-react';
+import {
+  IconCheck,
+  IconCpu,
+  IconDownload,
+  IconServer,
+  IconVideo,
+} from '@tabler/icons-react';
 import {
   Alert,
   Badge,
   Button,
   Card,
   Container,
+  Divider,
   Group,
+  Loader,
   Progress,
-  SegmentedControl,
   Stack,
   Text,
   ThemeIcon,
   Title,
 } from '@mantine/core';
+import { streamProjectExport, triggerProjectExport } from '../../lib/api';
 import {
-  getAccessToken,
-  getSceneImageFileUrl,
-  sceneOverlayAlpha,
-  sceneTransitionOpacity,
-} from '../../lib/api';
-import { encodeOffline, isOfflineEncodingSupported } from '../../lib/offlineEncode';
+  BrowserExportCanceledError,
+  BrowserExportError,
+  checkBrowserExportSupport,
+  exportProjectInBrowser,
+} from '../export/browserExport';
 import type { SceneModel } from '../VideoFlowContext';
 
 interface ExportViewProps {
   onDone: () => void;
   onBackToEditor: () => void;
+  trackerId: string | null;
   videoUrl: string | null;
   audioUrl: string | null;
   scenes: SceneModel[];
 }
 
-type Phase = 'config' | 'rendering' | 'done';
+type Phase = 'config' | 'rendering' | 'done' | 'failed';
 
 export function ExportView({
-  onDone,
   onBackToEditor,
+  trackerId,
   videoUrl,
   audioUrl,
   scenes,
 }: ExportViewProps) {
   const [phase, setPhase] = useState<Phase>('config');
-  const [resolution, setResolution] = useState('1080p');
   const [progress, setProgress] = useState(0);
+  const [statusMessage, setStatusMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  // Final video location: a local blob URL (browser render) or a remote URL
+  // (server render). `resultIsBlob` controls how the download link behaves.
+  const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [resultIsBlob, setResultIsBlob] = useState(false);
+  // Whether this browser can hardware-encode H.264 (checked once on mount).
+  const [browserSupported, setBrowserSupported] = useState<boolean | null>(null);
 
-  const rendererCanvas = useRef<HTMLCanvasElement | null>(null);
-  const mediaRecRef = useRef<MediaRecorder | null>(null);
+  // Cancellation handles for the two export paths.
+  const cancelRenderRef = useRef(false);
+  const abortRef = useRef<(() => void) | null>(null);
 
-  // Render the source video on a canvas with the scene-image overlay, recording
-  // the result via MediaRecorder into a downloadable webm blob.
-  const startRender = useCallback(async () => {
-    const hasVideo = !!videoUrl;
-    const hasAudio = !!audioUrl;
-    if (!hasVideo && !hasAudio) {
-      setError('No source file available to export.');
-      return;
-    }
-    const scenesHaveImages = scenes.some((s) => s.imageUrl);
-    if (!scenesHaveImages) {
-      setError('Some scenes are missing images — regenerate them first, then export.');
-      return;
-    }
-
-    setPhase('rendering');
-    setProgress(0);
-    setError(null);
-
-    // ------------------------------------------------------------------
-    // Fast path: offline WebCodecs encoding (modern browsers). This runs
-    // much faster than real time — "export in seconds". Falls through to
-    // the MediaRecorder recording path below if unsupported.
-    // ------------------------------------------------------------------
-    if (isOfflineEncodingSupported() && (videoUrl || audioUrl)) {
-      try {
-        const result = await encodeOffline({
-          videoUrl,
-          audioUrl,
-          scenes,
-          resolution: resolution as '1080p' | '720p',
-          onProgress: setProgress,
-        });
-        const url = URL.createObjectURL(result.blob);
-        setDownloadUrl(url);
-        setProgress(100);
-        setPhase('done');
-        return;
-      } catch (err) {
-        // Fall back to the real-time MediaRecorder path instead of failing.
-        setError(err instanceof Error ? err.message : 'Offline export failed; using fallback.');
-        setProgress(0);
+  // One-time capability probe so the UI can demote the browser option early.
+  useEffect(() => {
+    let alive = true;
+    void checkBrowserExportSupport().then((ok) => {
+      if (alive) {
+        setBrowserSupported(ok);
       }
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Revoke any blob URL when leaving the view / replacing the result.
+  useEffect(
+    () => () => {
+      abortRef.current?.();
+      if (resultUrl && resultIsBlob) {
+        URL.revokeObjectURL(resultUrl);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
+  const resetResult = useCallback(() => {
+    setResultUrl((prev) => {
+      if (prev && resultIsBlob) {
+        URL.revokeObjectURL(prev);
+      }
+      return null;
+    });
+    setResultIsBlob(false);
+  }, [resultIsBlob]);
+
+  /** Shared pre-flight validation; returns an error message or null. */
+  const validate = useCallback((): string | null => {
+    if (!trackerId) {
+      return 'No active project to export.';
+    }
+    if (!videoUrl && !audioUrl) {
+      return 'No source file available to export.';
+    }
+    if (!scenes.some((s) => s.imageUrl)) {
+      return 'Some scenes are missing images — regenerate them first, then export.';
+    }
+    return null;
+  }, [trackerId, videoUrl, audioUrl, scenes]);
+
+  // ------------------------------------------------------------------
+  // Path 1 (default): render in the browser with WebCodecs/mediabunny.
+  // ------------------------------------------------------------------
+  const startBrowserExport = useCallback(async () => {
+    const validationError = validate();
+    if (validationError) {
+      setError(validationError);
+      setPhase('failed');
+      return;
     }
 
-    const imageObjectUrls: string[] = [];
+    cancelRenderRef.current = false;
+    resetResult();
+    setError(null);
+    setProgress(0);
+    setStatusMessage('Preparing…');
+    setPhase('rendering');
 
     try {
-      const canvas = rendererCanvas.current ?? document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Canvas 2D not supported.');
-
-      const loadSceneImage = async (scene: SceneModel): Promise<HTMLImageElement | null> => {
-        if (!scene.imageUrl) return null;
-
-        const urls = scene.id ? [getSceneImageFileUrl(scene.id), scene.imageUrl] : [scene.imageUrl];
-        const token = getAccessToken();
-
-        for (const url of urls) {
-          try {
-            const res = await fetch(url, {
-              headers:
-                token && url === getSceneImageFileUrl(scene.id)
-                  ? { Authorization: `Bearer ${token}` }
-                  : undefined,
-            });
-            if (!res.ok) continue;
-
-            const blobUrl = URL.createObjectURL(await res.blob());
-            imageObjectUrls.push(blobUrl);
-
-            const img = new Image();
-            img.src = blobUrl;
-            await img.decode();
-
-            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-              return img;
-            }
-          } catch {
-            // Try the next URL source below.
-          }
-        }
-
-        return null;
-      };
-
-      // Preload scene images as same-origin blob URLs so the canvas is not
-      // tainted and authenticated backend image proxy requests can succeed.
-      const images = await Promise.all(scenes.map((scene) => loadSceneImage(scene)));
-      const firstLoadedImage = images.find((img): img is HTMLImageElement => img != null);
-      if (!firstLoadedImage) {
-        throw new Error('Could not load any scene images for export.');
-      }
-
-      // ------------------------------------------------------------------
-      // Common setup: dispatch clock + draw a fully-composited frame.
-      // ------------------------------------------------------------------
-
-      const sceneDuration = Math.max(
-        ...scenes.map((s) => s.endSeconds).filter((v) => Number.isFinite(v)),
-        0
-      );
-      let total = sceneDuration;
-      let video: HTMLVideoElement | null = null;
-      let audio: HTMLAudioElement | null = null;
-      let audioSourceElement: HTMLMediaElement | null = null;
-
-      // Paint one composited frame.
-      //  - alternate === true  (video job): the scene image *alternates* with the
-      //    real video footage using sceneOverlayAlpha, so the two "change places"
-      //    instead of being blended 50/50.
-      //  - alternate === false (audio job): there is no real footage, so the
-      //    scene image is shown full-screen continuously.
-      const drawFrame = (t: number, srcFrame: HTMLVideoElement | null, alternate: boolean) => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        // 1) Draw the source (real video) when available.
-        if (srcFrame) {
-          ctx.drawImage(srcFrame, 0, 0, canvas.width, canvas.height);
-        } else {
-          ctx.fillStyle = '#000';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-        }
-
-        // 2) Draw the active scene's image over the source, honoring its
-        // transition (fade / crossfade / Ken Burns).
-        const scene =
-          scenes.find((s) => t >= s.startSeconds && t < s.endSeconds) ?? scenes[scenes.length - 1];
-        const img = scene ? (images[scenes.indexOf(scene)] ?? firstLoadedImage) : firstLoadedImage;
-        if (scene && img.naturalWidth > 0) {
-          const elapsed = t - scene.startSeconds;
-          const dur = scene.endSeconds - scene.startSeconds;
-          const alpha = alternate
-            ? sceneTransitionOpacity(scene.transition, elapsed, dur)
-            : 1;
-          if (alpha > 0) {
-            ctx.globalAlpha = alpha;
-            if (scene.transition === 'kenburns') {
-              // Slow zoom: crop a progressively smaller (zoomed-in) region of
-              // the image so it appears to move, then draw it full-canvas.
-              const durSafe = Math.max(dur, 1);
-              const zoomT = Math.min(1, Math.max(0, elapsed / durSafe));
-              const crop = 1 - zoomT * 0.16; // shrink source rect = zoom in
-              const sw = img.naturalWidth * crop;
-              const sh = img.naturalHeight * crop;
-              const sx = (img.naturalWidth - sw) / 2;
-              const sy = (img.naturalHeight - sh) / 2;
-              ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-            } else {
-              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            }
-            ctx.globalAlpha = 1;
-          }
-          // NOTE: no scene label/number is burned into the video — the scene
-          // topic is available via the "Download Topics" button instead.
-        }
-
-        setProgress(Math.min(100, total > 0 ? Math.round((t / total) * 100) : 0));
-      };
-
-      const waitForMetadata = (el: HTMLMediaElement, message: string) => {
-        return new Promise<void>((resolve, reject) => {
-          if (Number.isFinite(el.duration) && el.readyState >= 1) {
-            resolve();
-            return;
-          }
-          el.onloadedmetadata = () => resolve();
-          el.onerror = () => reject(new Error(message));
-        });
-      };
-
-      const seekToStart = (el: HTMLMediaElement) => {
-        return new Promise<void>((resolve) => {
-          if (Math.abs(el.currentTime) < 0.01) {
-            resolve();
-            return;
-          }
-          el.onseeked = () => resolve();
-          el.currentTime = 0;
-        });
-      };
-
-      const stopRecording = () => {
-        const rec = mediaRecRef.current;
-        if (rec && rec.state !== 'inactive') {
-          rec.stop();
-        }
-      };
-
-      const playElements: HTMLMediaElement[] = [];
-
-      if (hasAudio && audioUrl) {
-        audio = document.createElement('audio');
-        audio.crossOrigin = 'anonymous';
-        audio.preload = 'auto';
-        audio.src = audioUrl;
-        await waitForMetadata(audio, 'Could not load source audio.');
-        if (Number.isFinite(audio.duration) && audio.duration > 0) {
-          total = Math.max(total, audio.duration);
-        }
-        audio.currentTime = 0;
-        audioSourceElement = audio;
-        playElements.push(audio);
-      }
-
-      const setupAudioTrack = (stream: MediaStream) => {
-        if (!audioSourceElement) return false;
-
-        const AudioContextCtor =
-          window.AudioContext ||
-          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-        if (!AudioContextCtor) {
-          throw new Error('This browser cannot include audio in the exported video.');
-        }
-
-        try {
-          const ac = new AudioContextCtor();
-          const srcNode = ac.createMediaElementSource(audioSourceElement);
-          const dest = ac.createMediaStreamDestination();
-          srcNode.connect(dest);
-          void ac.resume();
-          dest.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
-          return dest.stream.getAudioTracks().length > 0;
-        } catch {
-          throw new Error('Could not include the audio track in the export.');
-        }
-      };
-
-      const pickMimeType = (withAudio: boolean) => {
-        const candidates = withAudio
-          ? [
-              'video/webm;codecs=vp9,opus',
-              'video/webm;codecs=vp8,opus',
-              'video/webm;codecs=opus',
-              'video/webm',
-            ]
-          : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
-
-        return candidates.find(
-          (m) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m)
-        );
-      };
-
-      const buildRecorder = (stream: MediaStream) => {
-        const hasAudioTrack = stream.getAudioTracks().length > 0;
-        const mimeType = pickMimeType(hasAudioTrack);
-
-        if (!mimeType) {
-          throw new Error('This browser cannot record video export.');
-        }
-
-        const rec = new MediaRecorder(stream, {
-          mimeType,
-          videoBitsPerSecond: 8_000_000,
-          audioBitsPerSecond: hasAudioTrack ? 192_000 : undefined,
-        });
-        const chunks: Blob[] = [];
-        rec.ondataavailable = (e) => {
-          if (e.data && e.data.size > 0) chunks.push(e.data);
-        };
-        const stopped = new Promise<void>((resolve) => {
-          rec.onstop = () => resolve();
-        });
-        return { rec, chunks, stopped, mimeType };
-      };
-
-      const startPlayback = async () => {
-        await Promise.all(playElements.map((el) => el.play()));
-      };
-
-      const startLoop = (srcFrame: HTMLVideoElement | null, alternate: boolean) => {
-        const clock = srcFrame ?? audio;
-        const step = () => {
-          const rec = mediaRecRef.current;
-          if (!clock || !rec || rec.state === 'inactive') return;
-
-          const t = Math.min(clock.currentTime, total);
-          drawFrame(t, srcFrame, alternate);
-
-          if (clock.ended || t >= total) {
-            stopRecording();
-            return;
-          }
-
-          requestAnimationFrame(step);
-        };
-        requestAnimationFrame(step);
-      };
-
-      const onEnded = () => {
-        drawFrame(total, video, hasVideo);
-        stopRecording();
-      };
-
-      audio?.addEventListener('ended', onEnded, { once: true });
-
-      // ------------------------------------------------------------------
-      // Explicit, layout-independent render surface.
-      //
-      // Set the canvas backing-store to the *selected* export resolution so
-      // exports stay high-resolution regardless of any CSS-driven layout
-      // scaling. 1080p -> 1920x1080, 720p -> 1280x720. The source frame is
-      // letterboxed/drawn to fill this surface in drawFrame above.
-      // ------------------------------------------------------------------
-      const [OUT_W, OUT_H] = resolution === '1080p' ? [1920, 1080] : [1280, 720];
-      canvas.width = OUT_W;
-      canvas.height = OUT_H;
-      // Explicit attributes mirror the backing store; irrelevant for capture
-      // (which uses width/height) but keeps the element honest if it is ever
-      // mounted into the DOM.
-      canvas.setAttribute('width', String(OUT_W));
-      canvas.setAttribute('height', String(OUT_H));
-
-      if (hasVideo) {
-        video = document.createElement('video');
-        video.crossOrigin = 'anonymous';
-        video.muted = true;
-        video.preload = 'auto';
-        video.src = videoUrl!;
-        await waitForMetadata(video, 'Could not load source video.');
-
-        if (Number.isFinite(video.duration) && video.duration > 0) {
-          total = Math.max(total, video.duration);
-        }
-        await seekToStart(video);
-        playElements.unshift(video);
-        video.addEventListener('ended', onEnded, { once: true });
-        drawFrame(0, video, true);
-      } else {
-        drawFrame(0, null, false);
-      }
-
-      const stream = canvas.captureStream(30);
-      const hasRecordedAudio = setupAudioTrack(stream);
-      const { rec, chunks, stopped, mimeType } = buildRecorder(stream);
-      mediaRecRef.current = rec;
-
-      rec.start(250);
-
-      if (hasVideo) {
-        startLoop(video, true);
-      } else {
-        startLoop(null, false);
-      }
-
-      await startPlayback();
-
-      if (!hasVideo && !hasRecordedAudio) {
-        throw new Error('Could not include the audio track in the export.');
-      }
-
-      // Fallback guard in case an element never fires `ended`.
-      window.setTimeout(() => stopRecording(), Math.max(total * 1000 + 500, 1000));
-
-      await stopped;
-      video?.pause();
-      audio?.pause();
-      const blob = new Blob(chunks, { type: mimeType });
-      const url = URL.createObjectURL(blob);
-      setDownloadUrl(url);
+      const blob = await exportProjectInBrowser({
+        videoUrl,
+        audioUrl,
+        scenes,
+        onProgress: (pct, message) => {
+          setProgress(pct);
+          setStatusMessage(message);
+        },
+        shouldCancel: () => cancelRenderRef.current,
+      });
+      setResultUrl(URL.createObjectURL(blob));
+      setResultIsBlob(true);
       setProgress(100);
       setPhase('done');
     } catch (err) {
-      const rec = mediaRecRef.current;
-      if (rec && rec.state !== 'inactive') {
-        rec.stop();
+      if (err instanceof BrowserExportCanceledError) {
+        setPhase('config');
+        return;
       }
-      mediaRecRef.current = null;
-      setError(err instanceof Error ? err.message : 'Export failed.');
-      setPhase('config');
-      setProgress(0);
-    } finally {
-      imageObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+      setError(
+        err instanceof BrowserExportError
+          ? err.message
+          : 'Browser rendering failed. Try the server export instead.'
+      );
+      setPhase('failed');
     }
-  }, [videoUrl, audioUrl, scenes, resolution]);
+  }, [validate, resetResult, videoUrl, audioUrl, scenes]);
 
-  const cleanup = useCallback(() => {
-    const rec = mediaRecRef.current;
-    if (rec && rec.state !== 'inactive') {
-      rec.stop();
-    }
-    mediaRecRef.current = null;
+  const cancelBrowserExport = useCallback(() => {
+    cancelRenderRef.current = true;
   }, []);
 
-  useEffect(() => () => cleanup(), [cleanup]);
+  // ------------------------------------------------------------------
+  // Path 2 (fallback): queue an ffmpeg render on the server.
+  // ------------------------------------------------------------------
+  const startServerExport = useCallback(async () => {
+    const validationError = validate();
+    if (validationError) {
+      setError(validationError);
+      setPhase('failed');
+      return;
+    }
+
+    resetResult();
+    setError(null);
+    setProgress(0);
+    setStatusMessage('Queuing server-side export...');
+    setPhase('rendering');
+
+    try {
+      const status = await triggerProjectExport(trackerId as string);
+      setStatusMessage(status.status_message ?? 'Export queued on the server...');
+
+      if (status.status === 'completed' && status.video_url) {
+        setResultUrl(status.video_url);
+        setProgress(100);
+        setPhase('done');
+        return;
+      }
+      if (status.status === 'failed') {
+        setError(status.status_message || 'Export failed.');
+        setPhase('failed');
+        return;
+      }
+
+      setProgress(status.progress ?? 0);
+      abortRef.current = streamProjectExport(trackerId as string, {
+        onProgress: (s) => {
+          setProgress(s.progress ?? 0);
+          if (s.status_message) {
+            setStatusMessage(s.status_message);
+          }
+        },
+        onDone: (s) => {
+          if (s.status === 'completed' && s.video_url) {
+            setResultUrl(s.video_url);
+            setProgress(100);
+            setPhase('done');
+          } else {
+            setError(s.status_message || 'Export failed.');
+            setPhase('failed');
+          }
+        },
+        onError: (err) => {
+          setError(err.message || 'Export failed.');
+          setPhase('failed');
+        },
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not start the export.');
+      setPhase('failed');
+    }
+  }, [validate, resetResult, trackerId]);
+
+  const handleCancel = useCallback(() => {
+    // Works for whichever path is active: flags the browser loop, aborts SSE.
+    cancelBrowserExport();
+    abortRef.current?.();
+    abortRef.current = null;
+    setPhase('config');
+  }, [cancelBrowserExport]);
+
+  const handleBack = useCallback(() => {
+    cancelBrowserExport();
+    abortRef.current?.();
+    abortRef.current = null;
+    onBackToEditor();
+  }, [onBackToEditor, cancelBrowserExport]);
+
+  const isVideo = !!videoUrl;
 
   return (
     <Container size={520} py={60}>
       <Stack align="center" gap="lg">
         <Title order={2}>Export Video</Title>
+
+        <Text c="dimmed" size="sm" ta="center">
+          Renders right here in your browser using hardware acceleration — fast, private, and it
+          won't touch the server.
+        </Text>
 
         {error && (
           <Alert color="red" w="100%">
@@ -450,39 +262,44 @@ export function ExportView({
           <Card withBorder radius="lg" padding="xl" w="100%">
             <Stack gap="lg">
               <Stack gap={6}>
-                <Text fw={600}>Resolution</Text>
-                <SegmentedControl
-                  fullWidth
-                  value={resolution}
-                  onChange={setResolution}
-                  data={[
-                    { label: '1080p', value: '1080p' },
-                    { label: '720p', value: '720p' },
-                  ]}
-                />
+                <Text fw={600}>Output</Text>
+                <Badge variant="light" size="lg">
+                  1280×720 · MP4 · {isVideo ? '24fps video' : 'light 16fps (image+audio)'}
+                </Badge>
+                <Text c="dimmed" size="xs">
+                  {isVideo
+                    ? 'Renders the original video with each scene\u2019s generated image overlaid during its time range, transitions preserved by the encoder.'
+                    : 'Builds a video from your scene images timed to your uploaded audio, including the audio.'}
+                </Text>
               </Stack>
-              <Stack gap={6}>
-                <Text fw={600}>Format</Text>
-                <SegmentedControl
-                  fullWidth
-                  value="webm"
-                  onChange={() => undefined}
-                  data={[{ label: 'WEBM (recommended)', value: 'webm' }]}
-                />
-              </Stack>
+              <Divider />
               <Button
                 size="md"
-                leftSection={<IconVideo size={18} />}
-                onClick={() => void startRender()}
-                disabled={(!videoUrl && !audioUrl) || scenes.length === 0}
+                leftSection={<IconCpu size={18} />}
+                onClick={() => void startBrowserExport()}
+                disabled={
+                  browserSupported === false ||
+                  !trackerId ||
+                  (!videoUrl && !audioUrl) ||
+                  scenes.length === 0
+                }
               >
-                Export Video
+                Render in browser
               </Button>
-              <Text c="dimmed" size="xs" ta="center">
-                {audioUrl && !videoUrl
-                  ? 'Creates a video from your scene images, timed to your uploaded audio, and includes the audio in the export.'
-                  : 'Renders the original video with each scene\u2019s generated image alternating with the real footage during its time range.'}
-              </Text>
+              {browserSupported === false && (
+                <Text c="dimmed" size="xs" ta="center">
+                  This browser can't hardware-encode video — use the server option below.
+                </Text>
+              )}
+              <Button
+                variant="subtle"
+                size="xs"
+                leftSection={<IconServer size={14} />}
+                onClick={() => void startServerExport()}
+                disabled={!trackerId || (!videoUrl && !audioUrl) || scenes.length === 0}
+              >
+                Slow device? Render on the server instead
+              </Button>
             </Stack>
           </Card>
         )}
@@ -490,22 +307,17 @@ export function ExportView({
         {phase === 'rendering' && (
           <Card withBorder radius="lg" padding="xl" w="100%">
             <Stack align="center" gap="md">
-              <ThemeIcon size={56} radius="xl" variant="light" color="violet">
-                <IconLoader2 size={28} className="spin" />
+              <ThemeIcon size={56} radius="xl" variant="light" color="brand">
+                <Loader size={28} color="var(--ez-accent)" />
               </ThemeIcon>
-              <Title order={4}>Rendering...</Title>
-              <Progress
-                value={progress}
-                size="lg"
-                radius="xl"
-                striped
-                animated
-                color="violet"
-                w="100%"
-              />
-              <Text c="dimmed" size="sm">
-                {Math.round(progress)}% — Compositing your video with scene images.
+              <Title order={4}>Rendering your video…</Title>
+              <Progress value={progress} size="lg" radius="xl" striped animated w="100%" />
+              <Text c="dimmed" size="sm" className="ez-timecode">
+                {Math.round(progress)}% — {statusMessage || 'Rendering.'}
               </Text>
+              <Button variant="subtle" size="xs" onClick={handleCancel}>
+                Cancel
+              </Button>
             </Stack>
           </Card>
         )}
@@ -518,20 +330,51 @@ export function ExportView({
               </ThemeIcon>
               <Title order={4}>Your video is ready</Title>
               <Badge variant="light" size="lg">
-                imported-scenes.webm · {resolution} · WEBM
+                output.mp4 · 1280×720 · MP4
               </Badge>
               <Group>
-                {downloadUrl && (
+                {resultUrl && (
                   <Button
                     component="a"
-                    href={downloadUrl}
-                    download="imported-scenes.webm"
+                    href={resultUrl}
+                    download={resultIsBlob ? 'ezclip-export.mp4' : undefined}
+                    target={resultIsBlob ? undefined : '_blank'}
+                    rel={resultIsBlob ? undefined : 'noopener noreferrer'}
                     leftSection={<IconDownload size={18} />}
                   >
                     Download Video
                   </Button>
                 )}
-                <Button variant="subtle" onClick={onBackToEditor}>
+                <Button variant="subtle" onClick={handleBack}>
+                  Back to editor
+                </Button>
+              </Group>
+            </Stack>
+          </Card>
+        )}
+
+        {phase === 'failed' && (
+          <Card withBorder radius="lg" padding="xl" w="100%">
+            <Stack align="center" gap="md">
+              <Alert color="red" w="100%">
+                {error || 'Export failed.'}
+              </Alert>
+              <Group>
+                <Button
+                  leftSection={<IconCpu size={18} />}
+                  onClick={() => void startBrowserExport()}
+                  disabled={browserSupported === false}
+                >
+                  Try again in browser
+                </Button>
+                <Button
+                  variant="subtle"
+                  leftSection={<IconVideo size={16} />}
+                  onClick={() => void startServerExport()}
+                >
+                  Use server export
+                </Button>
+                <Button variant="subtle" onClick={handleBack}>
                   Back to editor
                 </Button>
               </Group>

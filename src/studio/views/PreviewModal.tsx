@@ -18,7 +18,7 @@ import {
   Text,
   ThemeIcon,
 } from '@mantine/core';
-import { formatSeconds, sceneOverlayAlpha } from '../../lib/api';
+import { formatSeconds, sceneTransitionOpacity } from '../../lib/api';
 import type { SceneModel } from '../VideoFlowContext';
 
 interface PreviewModalProps {
@@ -163,10 +163,12 @@ export function PreviewModal({
     [previewStart, syncMediaTo]
   );
 
-  // Overlay opacity: the scene image appears once at the scene start, then
-  // the real person is revealed for the rest of the scene (no flip-flopping).
+  // Overlay opacity: the scene's frame covers the footage for exactly its
+  // [start, end] window, shaped by that scene's transition (same math as the
+  // inline preview and the browser export — WYSIWYG everywhere).
   const overlayAlpha = overlayScene.imageUrl
-    ? sceneOverlayAlpha(
+    ? sceneTransitionOpacity(
+        overlayScene.transition,
         currentTime - overlayScene.startSeconds,
         overlayScene.endSeconds - overlayScene.startSeconds
       )
@@ -230,7 +232,7 @@ export function PreviewModal({
               h="100%"
               w="100%"
               style={{
-                background: 'var(--mantine-color-violet-1)',
+                background: 'var(--ez-accent-dim)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -283,7 +285,7 @@ export function PreviewModal({
               }}
             >
               <Group gap="xs" align="center">
-                <Badge variant="filled" color="violet" size="sm">
+                <Badge variant="filled" color="brand" size="sm" className="ez-timecode">
                   Scene {String(overlayScene.number).padStart(2, '0')}
                 </Badge>
                 <Text fw={600} size="sm" style={{ lineClamp: 1 }}>
@@ -366,13 +368,13 @@ export function PreviewModal({
             label={(v) => formatSeconds(previewStart + (v / 100) * previewDuration)}
           />
           <Group justify="space-between">
-            <Text size="sm" c="dimmed">
+            <Text size="sm" c="dimmed" className="ez-timecode">
               {formatSeconds(currentTime)}
             </Text>
             <Text size="sm" fw={600}>
               Scene {String(overlayScene.number).padStart(2, '0')} · {overlayScene.title}
             </Text>
-            <Text size="sm" c="dimmed">
+            <Text size="sm" c="dimmed" className="ez-timecode">
               {formatSeconds(previewEnd)}
             </Text>
           </Group>
